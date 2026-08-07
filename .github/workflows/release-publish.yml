@@ -1,0 +1,132 @@
+name: Publish to npm (GitHub Release)
+
+# Adapted from the n8n-node release workflow, with two differences: this package uses pnpm, and it
+# has no .node.json codex to keep in sync.
+#
+# Trusted publishing (OIDC) — NO npm token exists anywhere. npm mints a short-lived credential from
+# the GitHub OIDC identity, which is why the "Ensure Trusted Publishing" step below actively strips
+# any ambient auth: a stray token would silently take precedence and publish WITHOUT provenance.
+#
+# The first publish of a NEW package cannot use this workflow: npm can only configure a trusted
+# publisher on a package that already exists. Publish 0.1.0 manually once, configure trusted
+# publishing on npmjs.com, then every release after that runs here.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v1.0.1)"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: NPM
+    permissions:
+      id-token: write   # required: OIDC trusted publishing authenticates with this
+      contents: read
+
+    steps:
+      # The tag is untrusted input and reaches both a shell and actions/checkout's `ref:`. Two
+      # defenses: pass it via env (never interpolate ${{ }} straight into `run:`, which would splice
+      # attacker text into the script), and validate the shape so nothing containing shell
+      # metacharacters, newlines, or a `ref:` traversal can proceed. This job holds id-token: write
+      # and publishes to npm — an injection here is a supply-chain compromise, not a broken build.
+      - name: Resolve and validate release tag
+        id: vars
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$EVENT_TAG}"
+          if [ -z "$TAG" ]; then echo "No tag supplied."; exit 1; fi
+          # Reject newlines FIRST and explicitly. A tag like $'v1.0.0\nrelease_tag=evil' would append
+          # a second line to $GITHUB_OUTPUT and hijack the ref. (Do NOT validate with `grep -qE` here:
+          # grep matches line-by-line, so it happily passes a multi-line value whose first line looks
+          # like a version. Verified.) bash's [[ =~ ]] anchors to the whole string.
+          case "$TAG" in *$'\n'*|*$'\r'*) echo "Refusing tag containing a newline."; exit 1;; esac
+          if [[ ! "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "Refusing tag with an unexpected shape: $TAG"
+            exit 1
+          fi
+          printf 'release_tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.vars.outputs.release_tag }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Upgrade npm
+        run: npm install -g npm@latest   # publishing goes through npm; trusted publishing needs a recent one
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify tag matches package.json version
+        env:
+          RELEASE_TAG: ${{ steps.vars.outputs.release_tag }}
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION=${RELEASE_TAG#v}
+          echo "Release tag: ${RELEASE_TAG} · package.json: ${PKG_VERSION}"
+          if [ "${TAG_VERSION}" != "${PKG_VERSION}" ]; then
+            echo "Tag version (${TAG_VERSION}) does not match package.json version (${PKG_VERSION})."
+            exit 1
+          fi
+
+      - name: Test
+        run: pnpm test    # the offline suite; needs no credentials
+
+      - name: Build
+        run: pnpm build
+
+      - name: Ensure Trusted Publishing (no npm token auth)
+        run: |
+          rm -f ~/.npmrc
+          npm config set registry https://registry.npmjs.org/
+          npm config delete //registry.npmjs.org/:_authToken || true
+          npm config delete //registry.npmjs.org/:_auth || true
+          unset NODE_AUTH_TOKEN || true
+          unset NPM_TOKEN || true
+
+      - name: Diagnostics (auth + OIDC)
+        run: |
+          echo "registry: $(npm config get registry)"
+          node -e "console.log('OIDC request URL present:', Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL))"
+          node -e "console.log('NODE_AUTH_TOKEN present:', Boolean(process.env.NODE_AUTH_TOKEN))"
+
+      # A prerelease must NOT become the default install. The tag regex above deliberately accepts
+      # v1.2.3-beta.1, and `npm publish` with no --tag silently publishes under `latest` -- so cutting
+      # a GitHub prerelease would hand every plain `npm install` a beta. Derive the dist-tag from the
+      # version instead: anything with a prerelease identifier goes to `next`, everything else to
+      # `latest` (npm's own default, stated explicitly rather than implied).
+      - name: Publish
+        env:
+          RELEASE_TAG: ${{ steps.vars.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          case "$VERSION" in
+            *-*) DIST_TAG=next ;;
+            *)   DIST_TAG=latest ;;
+          esac
+          echo "Publishing ${VERSION} under dist-tag: ${DIST_TAG}"
+          npm publish --provenance --access public --tag "$DIST_TAG"

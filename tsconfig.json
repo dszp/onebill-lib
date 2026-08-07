@@ -1,0 +1,23 @@
+{
+  "//types": "compilerOptions.types is empty on purpose, with no @types/node installed. That is what structurally enforces Node-freeness: a stray `node:*` import fails `pnpm build`. Please don't add @types/node to make an error go away -- the error is the feature. (This note lives at the root because tsc rejects unknown keys inside compilerOptions.)",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "types": [],
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": false
+  },
+  "include": ["src/**/*.ts"],
+  "//exclude": "testkit.ts is the shared mock-fetch harness: type-checked by tsconfig.test.json, imported by the *.test.ts files (which vitest transpiles independently of this build), and never part of the shipped API.",
+  "exclude": ["src/**/*.test.ts", "src/testkit.ts", "dist", "node_modules"]
+}

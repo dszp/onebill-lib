@@ -1,0 +1,67 @@
+{
+  "name": "@dszp/onebill-lib",
+  "version": "0.1.0",
+  "description": "Portable, Node-free OneBill toolkit: split read/write API clients and a generic multi-system link codec for the Subscriber externalId field. Runs unchanged in a Cloudflare Worker, Node, or the browser.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "David Szpunar",
+    "url": "https://david.szpunar.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dszp/onebill-lib.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dszp/onebill-lib/issues"
+  },
+  "homepage": "https://github.com/dszp/onebill-lib#readme",
+  "//publishConfig": "No `provenance: true` here on purpose: it would force provenance on EVERY publish, including the manual first one that a brand-new package requires (npm can only configure trusted publishing on a package that already exists). Provenance comes from the workflow's explicit `npm publish --provenance` in CI.",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "onebill",
+    "billing",
+    "subscription",
+    "integration",
+    "cloudflare-workers"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "//require": "ESM-only package. This `require` condition lets Node >=22.12 load it via require(esm); older Node still gets an accurate ERR_REQUIRE_ESM here instead of the confusing ERR_PACKAGE_PATH_NOT_EXPORTED the bare export map produced.",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/index.d.ts",
+  "module": "./dist/index.js",
+  "main": "./dist/index.js",
+  "sideEffects": false,
+  "//files": "Globs exclude dist/**/*.map on purpose: the maps point at src/, which does not ship, so shipping them gives every consumer broken references. Maps are still emitted locally for link: consumers.",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:watch": "tsc -p tsconfig.json --watch",
+    "//prepublishOnly": "Publish-only build with sourcemaps OFF. The `files` globs exclude dist/**/*.map on purpose (they point at src/, which does not ship), but tsc still emits a //# sourceMappingURL pointer into every .js/.d.ts -- so consumers' devtools 404 chasing maps that were never published. Dropping the pointer at publish time is what the exclusion always meant. A normal `pnpm build` keeps maps for link: consumers.",
+    "prepublishOnly": "tsc -p tsconfig.json --sourceMap false --declarationMap false",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^3"
+  },
+  "packageManager": "pnpm@11.11.0"
+}

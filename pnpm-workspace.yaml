@@ -1,0 +1,4 @@
+# Build-script allowlist (pnpm 11 reads it here, not package.json).
+# `vitest` pulls esbuild's native binary; nothing else builds.
+allowBuilds:
+  esbuild: true
