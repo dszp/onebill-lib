@@ -45,9 +45,12 @@
   "main": "./dist/index.js",
   "sideEffects": false,
   "//files": "Globs exclude dist/**/*.map on purpose: the maps point at src/, which does not ship, so shipping them gives every consumer broken references. Maps are still emitted locally for link: consumers.",
+  "//files": "The maps and `src` ship together on purpose. tsc writes a sourceMappingURL pointer into every dist file, and the .d.ts.map references ../src/*.ts — so publishing the pointers WITHOUT them gave consumers a 404 and no Go-to-Definition: the cost of the flags with none of the benefit. With these, a Worker stack trace names a real .ts line and Go-to-Definition opens actual source. Same shape in all four libs — change all of them or none.",
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
+    "dist/**/*.map",
+    "src",
     "README.md"
   ],
   "scripts": {
