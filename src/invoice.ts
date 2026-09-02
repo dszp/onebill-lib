@@ -516,6 +516,17 @@ const CENT = 0.005;
  * an invoice whose charge total balances can still have lost individual calls inside a rollup.
  */
 export function reconcileInvoice(flat: FlatInvoice): InvoiceReconciliation {
+  // `getInvoiceDetail` is what a caller has in hand at this point, and passing it straight here is
+  // an easy mistake that used to surface as `Cannot read properties of undefined (reading 'reduce')`
+  // from inside this function — an error about the library's internals rather than the caller's
+  // mistake. Name the fix instead.
+  if (!Array.isArray(flat?.chargeLines) || !Array.isArray(flat?.calls)) {
+    throw new TypeError(
+      'reconcileInvoice expects a FlatInvoice. Call flattenInvoice(detail) on the record from ' +
+        'getInvoiceDetail first, and pass the result.',
+    );
+  }
+
   const chargeLineTotal = flat.chargeLines.reduce((s, l) => s + l.amount, 0);
   const surchargeTotal = flat.surcharges.reduce((s, l) => s + l.amount, 0);
   const computedTotal = chargeLineTotal + surchargeTotal + flat.totalDiscount;

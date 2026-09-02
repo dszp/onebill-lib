@@ -410,12 +410,20 @@ against a live tenant.
 ### What an account is exempt from
 
 ```ts
-import { taxExemptionCodesOf, taxJurisdictionsOf } from '@dszp/onebill-lib';
+import { taxExemptionCodesOf, hasTaxExemptionCode, taxJurisdictionsOf } from '@dszp/onebill-lib';
 
 const account = await client.getSubscriber('CLI00000');
-taxExemptionCodesOf(account);   // [{ code: '32', description: 'State and Local Sales Tax Exempt' }]
-taxJurisdictionsOf(account);    // ['IN'] — the states this account has addresses in
+
+taxExemptionCodesOf(account);        // [{ code: '32', description: 'State and Local Sales Tax Exempt' }]
+taxExemptionCodesOf(account).map((c) => c.code);   // ['32'] — the bare codes
+hasTaxExemptionCode(account, '34');  // false — the membership test
+taxJurisdictionsOf(account);         // ['IN'] — the states this account has addresses in
 ```
+
+**`taxExemptionCodesOf` returns objects, not strings**, because the descriptions are worth keeping.
+So `codes.includes('34')` is quietly false and `codes.join(',')` is quietly
+`"[object Object]"` — neither errors. Use `hasTaxExemptionCode` to test membership, or
+`.map(c => c.code)` for the bare codes.
 
 `taxExemptionCode` is **absent** when an account has no exemption, not empty — test presence, not
 truthiness. Use the accessor rather than walking it: a **singular** `code` key holds the array and
@@ -437,6 +445,7 @@ address across a tenant where a minority of accounts were genuinely exempt.
 ```ts
 import { flattenInvoice, taxTotalsByDescription, taxTotalsByJurisdiction } from '@dszp/onebill-lib';
 
+// flattenInvoice first — reconcileInvoice and the tax totals take a FlatInvoice, not the raw record.
 const flat = flattenInvoice(await client.getInvoiceDetail('INV00000'));
 taxTotalsByDescription(flat).get('STATE USE TAX');   // 238.61
 taxTotalsByJurisdiction(flat).get('MI');             // 759.86
@@ -475,8 +484,10 @@ is stored here, not even invoices.
 
 **Match on `name`, not `type`.** `type` is required by the upload form but is missing from the API
 response for every document uploaded to a live tenant since 2025-05-12, while every one uploaded
-through 2024-11-22 carried it — a clean split, independent of the type chosen and of visibility.
-Filtering on it drops every recent document.
+through 2024-11-22 carried it — a clean split, independent of the type chosen and of visibility. A
+document uploaded as an externally-visible `Contract` came back untyped just as an internal
+`Supporting Document` did, so "untyped" means neither "internal" nor "no type chosen". Filtering on
+it drops every recent document.
 
 `documents` is absent rather than empty when an account has none, which `getSubscriberDocuments`
 normalises to `[]`. Note the list response embeds every file's full base64 content and offers no

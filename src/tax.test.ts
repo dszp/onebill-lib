@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  hasTaxExemptionCode,
   subscriberDocumentBytes,
   taxExemptionCodesOf,
   taxJurisdictionsOf,
@@ -134,5 +135,38 @@ describe('the document `type` field is not dependable', () => {
     expect(docs.filter((d) => d.type === 'Supporting Document')).toHaveLength(0);
     // The exemption certificate is findable by name, and only by name.
     expect(docs.filter((d) => d.name?.includes('TaxExemption'))).toHaveLength(1);
+  });
+});
+
+describe('hasTaxExemptionCode', () => {
+  const three = sub({
+    codes: [{ code: '08' }, { code: '32' }, { code: '34', description: 'State Use Tax' }],
+  });
+
+  it('finds a code the account carries', () => {
+    expect(hasTaxExemptionCode(three, '34')).toBe(true);
+    expect(hasTaxExemptionCode(three, '08')).toBe(true);
+  });
+
+  it('is false for a code the account does not carry', () => {
+    expect(hasTaxExemptionCode(three, '99')).toBe(false);
+  });
+
+  it('is false, not throwing, for an account with no exemption at all', () => {
+    expect(hasTaxExemptionCode(sub({ codes: [] }), '34')).toBe(false);
+  });
+
+  it('rejects an empty code rather than matching everything', () => {
+    expect(hasTaxExemptionCode(three, '')).toBe(false);
+    expect(hasTaxExemptionCode(three, '   ')).toBe(false);
+  });
+
+  it('exists because the list accessor returns objects, not strings', () => {
+    // Both of these are the quiet wrong answer this function prevents: neither errors.
+    const codes = taxExemptionCodesOf(three);
+    expect((codes as unknown as string[]).includes('34')).toBe(false);
+    expect(codes.join(',')).toBe('[object Object],[object Object],[object Object]');
+    expect(hasTaxExemptionCode(three, '34')).toBe(true);
+    expect(codes.map((c) => c.code)).toEqual(['08', '32', '34']);
   });
 });

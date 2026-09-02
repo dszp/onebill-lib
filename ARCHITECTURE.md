@@ -201,7 +201,7 @@ the distinction survives even for a caller who only reads the number.
 
 ## Exemption is an account fact; jurisdiction is not on it
 
-`Subscriber.taxExemptionCode` is **absent** when an account has none — most on a live tenant —
+`Subscriber.taxExemptionCode` is **absent** when an account has none — most accounts on a live tenant —
 so presence is the test, not truthiness. Its shape invites a specific bug: a **singular** `code` key
 holds the array, and every element also has a `code`, so the value is at
 `taxExemptionCode.code[].code` and a read one level short returns an array where a string was
@@ -229,8 +229,10 @@ address across that tenant, including all 12 genuinely exempt ones.
 certificates, receipts. No generated artefact is stored there, not even invoices, so it is an
 attachment repository rather than a document archive.
 
-Two shapes matter. `documents` is **absent, not an empty array**, when an account holds none — 47 of
-the accounts on a live tenant — so `res.documents.length` throws on the majority case.
+Two shapes matter. `documents` is **usually absent rather than an empty array** when an account
+holds none — roughly half the accounts on a live tenant — so `res.documents.length` throws on a
+common case. An empty array has also been observed, so both shapes are live in one tenant and
+`getSubscriberDocuments` normalises both.
 
 And `type` cannot be trusted. The upload form marks Document Type required, yet across a live tenant
 every document uploaded from 2025-05-12 onward came back with **no `type` field**, while every one

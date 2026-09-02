@@ -65,6 +65,7 @@ export {
 
 // Domain types, plus the pure accessors over them.
 export {
+  hasTaxExemptionCode,
   invoicePdfBytes,
   isQuoteOrder,
   orderStateOf,

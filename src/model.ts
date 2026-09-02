@@ -75,7 +75,7 @@ export interface Subscriber {
   address?: SubscriberAddress[] | SubscriberAddress;
   /**
    * Account-level "do not tax this account" switch. **This is not the exemption mechanism**, and
-   * assuming it is will read every exempt account as taxable: across a live live tenant
+   * assuming it is will read every exempt account as taxable: across a live tenant
    * it was `false` on every account and on every address, while a minority of accounts carried genuine
    * {@link Subscriber.taxExemptionCode} entries. Exemption is the code list; this is a separate,
    * blunter flag.
@@ -132,6 +132,11 @@ export interface SubscriberAddress {
  * Returns `[]` when the account has none, which is the common case. Tolerates the container being
  * absent, and a single entry arriving unwrapped instead of in an array.
  *
+ * **Returns objects, not strings** — `{ code, description }`, because the descriptions are worth
+ * keeping. So `.includes('34')` is quietly false and `.join(',')` is quietly
+ * `"[object Object]"`; neither errors. Use {@link hasTaxExemptionCode} for a membership test, or
+ * `.map(c => c.code)` for the bare codes.
+ *
  * **The codes are not interpreted here, deliberately.** They are the tax vendor's vocabulary and
  * are extended per tenant — a helper like `isSalesTaxExempt()` would bake one jurisdiction's
  * meanings into a general-purpose library, which is the same rule that keeps namespace constants
@@ -152,6 +157,23 @@ export function taxExemptionCodesOf(subscriber: Subscriber): TaxExemptionCode[] 
   return list.filter((e): e is TaxExemptionCode => {
     return typeof e === 'object' && e !== null && typeof (e as TaxExemptionCode).code === 'string';
   });
+}
+
+/**
+ * Does this subscriber carry a given tax-treatment code?
+ *
+ * The membership test, which is the question most callers have — `taxExemptionCodesOf` returns
+ * {@link TaxExemptionCode} **objects** rather than strings, because the descriptions are worth
+ * keeping, and that makes `codes.includes('34')` quietly false and `codes.join(',')` quietly
+ * `"[object Object]"`. Neither errors, so use this rather than comparing the list yourself.
+ *
+ * The code to look for is **yours to supply**: this compares, it does not interpret. Comparison is
+ * exact after trimming — codes are vendor vocabulary and case is not ours to normalise.
+ */
+export function hasTaxExemptionCode(subscriber: Subscriber, code: string): boolean {
+  const wanted = String(code ?? '').trim();
+  if (wanted === '') return false;
+  return taxExemptionCodesOf(subscriber).some((c) => c.code.trim() === wanted);
 }
 
 /**
@@ -677,14 +699,19 @@ export interface SubscriberDocument {
    * The document category chosen at upload — `Contract`, `Supporting Document`, `Quote`, `Invoice`,
    * `Receipt`, `Consent`.
    *
-   * **Absent far more often than you would expect, and filtering on it loses documents.** The
-   * upload form marks it required, yet a quarter of the rows across a live tenant came back with no `type`
-   * at all. Every internally-visible document lacked it, and some externally-visible ones did too —
-   * so `type` missing does not even reliably mean "internal".
+   * **Do not filter on this.** The upload form marks Document Type required, yet the API stopped
+   * returning it: across a live tenant, every document uploaded from **2025-05-12** onward came
+   * back with no `type` at all, while every one uploaded through **2024-11-22** carried it — a
+   * clean split with zero overlap either side.
+   *
+   * It tracks neither the type chosen at upload nor the visibility flag. A document uploaded as an
+   * externally-visible `Contract` came back untyped exactly as an internal `Supporting Document`
+   * did, so "untyped" does not mean "internal" and does not mean "no type was chosen".
    *
    * The practical consequence: `documents.filter(d => d.type === 'Supporting Document')` silently
-   * omits every internal document, which is exactly where tax exemption certificates tend to be
-   * filed. Match on {@link SubscriberDocument.name} instead, and treat `type` as a hint.
+   * omits every *recent* document — which is precisely where a current tax exemption certificate
+   * will be. Match on {@link SubscriberDocument.name} instead, and treat `type` as a hint that
+   * exists only on older records.
    */
   type?: string;
   /** A free-text reference entered at upload. Optional in the form and usually empty. */
@@ -705,8 +732,8 @@ export interface SubscriberDocument {
 /**
  * The envelope the subscriber-documents endpoint returns.
  *
- * **`documents` is absent, not empty, when the account has none** — roughly half the accounts on a live
- * tenant omitted the key entirely. Code shaped as `res.documents.length` throws on the majority
+ * **`documents` is absent, not empty, when the account has none** — on a live tenant roughly half
+ * the accounts omitted the key entirely. Code shaped as `res.documents.length` throws on the majority
  * case; `getSubscriberDocuments` normalises it to an array.
  */
 export interface SubscriberDocumentsResponse {

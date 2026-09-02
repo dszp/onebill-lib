@@ -437,3 +437,21 @@ describe('reconcileInvoice tax checks', () => {
     expect(reconcileInvoice(flat).taxBalanced).toBe(false);
   });
 });
+
+describe('reconcileInvoice input guard', () => {
+  it('names the fix when handed a raw InvoiceDetail instead of a FlatInvoice', () => {
+    // getInvoiceDetail's record is what a caller has in hand here, so this is easy to trip; it used
+    // to fail as a property error from inside the library.
+    expect(() => reconcileInvoice(detail() as unknown as Parameters<typeof reconcileInvoice>[0]))
+      .toThrow(/expects a FlatInvoice.*flattenInvoice\(detail\)/s);
+  });
+
+  it('rejects undefined rather than throwing a property error', () => {
+    expect(() => reconcileInvoice(undefined as unknown as Parameters<typeof reconcileInvoice>[0]))
+      .toThrow(TypeError);
+  });
+
+  it('still accepts a genuine FlatInvoice', () => {
+    expect(reconcileInvoice(flattenInvoice(detail())).balanced).toBe(true);
+  });
+});

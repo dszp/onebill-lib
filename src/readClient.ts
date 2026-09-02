@@ -318,12 +318,14 @@ export class OneBillReadClient {
   /**
    * The files attached to a subscriber — contracts, tax exemption certificates, receipts.
    *
-   * **The response omits `documents` entirely when an account has none** rather than returning an
-   * empty array; roughly half the accounts on a live tenant did. This normalises that to `[]`.
+   * **The response usually omits `documents` entirely when an account has none** rather than
+   * returning an empty array — roughly half the accounts on a live tenant did — though an empty
+   * array has also been observed, so both shapes are live in one tenant. This normalises both
+   * to `[]`.
    *
    * **Every call downloads every file.** The list response carries each document's full base64
-   * `content` inline, with no metadata-only mode — a sweep across that tenant moved tens of megabytes, and a
-   * single attachment reached several megabytes. Fetch per account rather than sweeping, unless you mean it.
+   * `content` inline, with no metadata-only mode — a tenant-wide sweep moves tens of megabytes, and a
+   * single attachment can reach several. Fetch per account rather than sweeping, unless you mean it.
    *
    * Note {@link SubscriberDocument.type} is unreliable and filtering on it loses documents; see
    * that field. Decode a file with `subscriberDocumentBytes`.
@@ -593,7 +595,7 @@ export class OneBillReadClient {
    * metered charge.
    *
    * **This is the same detail as the XML representation**, verified against it call-for-call and
-   * cent-for-cent on invoices up to a five-figure call count (2026-09-02). Prefer it: the XML for that invoice
+   * cent-for-cent on invoices with a five-figure call count (2026-09-02). Prefer it: the XML for that invoice
    * is 37 MB of text that no dependency-free parser in this library could responsibly handle,
    * while this arrives as a structure the runtime has already parsed.
    *

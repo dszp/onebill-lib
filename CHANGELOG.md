@@ -5,6 +5,36 @@ All notable changes to `@dszp/onebill-lib` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-09-02
+
+Follow-up to 0.3.0 from consumer feedback. No behaviour change to anything that already worked.
+
+### Added
+
+- **`hasTaxExemptionCode(subscriber, code)`** — the membership test. `taxExemptionCodesOf` returns
+  `{ code, description }` **objects**, so `codes.includes('34')` is quietly false and
+  `codes.join(',')` is quietly `"[object Object]"`; neither errors, and both were reported from real
+  use. The code to look for is the caller's to supply — this compares, it does not interpret.
+
+### Changed
+
+- **`reconcileInvoice` now throws a `TypeError` naming the fix** when handed something that is not a
+  `FlatInvoice`. Passing the record from `getInvoiceDetail` straight in — which is what a caller has
+  in hand at that point — previously failed as
+  `Cannot read properties of undefined (reading 'reduce')` from inside the library.
+
+### Fixed
+
+- **The `SubscriberDocument.type` doc comment explained the wrong cause.** 0.3.0 attributed the
+  missing field to internal visibility. That was a hypothesis falsified afterwards by a document
+  uploaded as an externally-visible `Contract`, which came back untyped exactly as an internal one
+  did. The real boundary is the upload date, and the corrected comment says so. The guidance —
+  match on `name` — was right either way, but the reasoning behind it was not.
+
+- **`documents` is *usually* absent rather than empty when an account has none, not always.** An
+  empty array has since been observed on the same tenant, so both shapes are live.
+  `getSubscriberDocuments` already normalised both; only the documentation overstated it.
+
 ## [0.3.0] — 2026-09-02
 
 Tax: what an account is exempt from, what an invoice was actually taxed, and the documents that
@@ -16,8 +46,7 @@ exemption paths at all, so none of this is inferable from the spec.
 - **Tax exemption on the subscriber** — `Subscriber.taxExemptionCode`, `TaxExemptionCode`,
   `TaxExemptionCodes`, `SubscriberAddress`, `taxExemptionCodesOf`, `taxJurisdictionsOf`.
 
-  The field is **absent, not empty**, when an account has no exemption (most accounts on a live
-  tenant), so presence must be tested rather than truthiness. Its shape is a trap: a **singular**
+  The field is **absent, not empty**, when an account has no exemption (most accounts on a live tenant), so presence must be tested rather than truthiness. Its shape is a trap: a **singular**
   `code` key holds the array, and every element also has a `code` key — the value is at
   `taxExemptionCode.code[].code`, and reading one level short silently yields an array where a
   string was expected. Codes are strings and **not always numeric** (`TF` observed alongside
@@ -66,7 +95,7 @@ exemption paths at all, so none of this is inferable from the spec.
   rendered documents live — no generated artefact appears here, not even invoices.
 
   Two shapes worth knowing. `documents` is **absent, not an empty array**, when an account has none
-  (roughly half the accounts). And **`type` cannot be relied on**: it is required by the upload form, yet
+  (roughly half the accounts on a live tenant). And **`type` cannot be relied on**: it is required by the upload form, yet
   every document uploaded to a live tenant from 2025-05-12 onward came back with no `type` at all,
   while every one uploaded through 2024-11-22 carried it — a clean split with zero overlap,
   independent of the type chosen and of visibility. Filtering on `type` therefore silently drops
