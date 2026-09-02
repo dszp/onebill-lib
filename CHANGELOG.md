@@ -5,6 +5,86 @@ All notable changes to `@dszp/onebill-lib` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-09-02
+
+Tax: what an account is exempt from, what an invoice was actually taxed, and the documents that
+justify it. All read-only, all verified live — the published OpenAPI contains **no** tax or
+exemption paths at all, so none of this is inferable from the spec.
+
+### Added
+
+- **Tax exemption on the subscriber** — `Subscriber.taxExemptionCode`, `TaxExemptionCode`,
+  `TaxExemptionCodes`, `SubscriberAddress`, `taxExemptionCodesOf`, `taxJurisdictionsOf`.
+
+  The field is **absent, not empty**, when an account has no exemption (most accounts on a live
+  tenant), so presence must be tested rather than truthiness. Its shape is a trap: a **singular**
+  `code` key holds the array, and every element also has a `code` key — the value is at
+  `taxExemptionCode.code[].code`, and reading one level short silently yields an array where a
+  string was expected. Codes are strings and **not always numeric** (`TF` observed alongside
+  two-digit codes), are extended per tenant, and are deliberately **not interpreted** here — the
+  same rule that keeps namespace constants out of the link codec.
+
+  **Which codes an account needs depends on its state**, and the codes carry no jurisdiction of
+  their own: the only keys on a code entry are `code` and `description`. Live, Indiana accounts
+  carried one sales-tax code, Michigan accounts carried use-tax codes, and a Florida account carried
+  six including excise and gross-receipts codes with no Midwest equivalent. `taxJurisdictionsOf`
+  returns the states from the account's addresses — which are a **list**, each with its own
+  `isSkipTax` — so an exemption can be checked against the state it is meant to apply in.
+
+  `isSkipTax` is **not** the exemption mechanism: it was `false` on every account and every address
+  across that tenant while a minority of accounts carried genuine exemption codes.
+
+- **Per-tax detail on invoices** — `InvoiceTaxLine`, `FlatInvoice.taxes`,
+  `InvoiceChargeLine.taxLines`, `InvoiceCall.taxAmount`, `InvoiceCall.taxed`,
+  `taxTotalsByDescription`, `taxTotalsByJurisdiction`, and `taxLineTotal` / `chargeTaxTotal` /
+  `statedTaxTotal` / `taxBalanced` on `reconcileInvoice`.
+
+  Tax components live at **two different depths**: on the charge line for recurring charges, and on
+  the individual calls for usage — because a usage rollup has no `taxLineItem` node at all and
+  carries the sum of its calls' tax as its own `taxAmount`. Collecting from one depth misses the
+  other, which is why "how much STATE USE TAX did this invoice carry" previously required a
+  hand-written recursive walk. `FlatInvoice.taxes` is aggregated per
+  (description, groupCode, code) rather than itemised, so a large invoice does not produce
+  tens of thousands of near-identical rows.
+
+  `InvoiceCall.taxAmount` is `undefined` — never `0` — when a call carries no tax record, and
+  `taxed` reports the presence of the node. **Do not collapse these with `?? 0`.** A call taxed at
+  zero and a call the tax engine never answered for are different facts, and the second is a real
+  defect: on one live catch-up invoice well over a thousand billed calls had no tax element at all while
+  identically-priced calls in the same months were taxed normally. Telling "exempt" from "the tax
+  engine returned nothing" needs the exemption codes above, which is why both shipped together.
+
+  `taxBalanced` checks the collected components against each charge line's own `taxAmount` and
+  against the invoice's stated tax. It deliberately does **not** use `taxLineItem.totalTax`: a usage
+  rollup has none, so a control built on it omits every metered charge's tax and then agrees with a
+  walk that made the same omission.
+
+- **Subscriber documents** — `getSubscriberDocuments`, `SubscriberDocument`,
+  `SubscriberDocumentsResponse`, `subscriberDocumentBytes`.
+
+  Contracts, tax exemption certificates, receipts. An attachment repository, not where OneBill's
+  rendered documents live — no generated artefact appears here, not even invoices.
+
+  Two shapes worth knowing. `documents` is **absent, not an empty array**, when an account has none
+  (roughly half the accounts). And **`type` cannot be relied on**: it is required by the upload form, yet
+  every document uploaded to a live tenant from 2025-05-12 onward came back with no `type` at all,
+  while every one uploaded through 2024-11-22 carried it — a clean split with zero overlap,
+  independent of the type chosen and of visibility. Filtering on `type` therefore silently drops
+  every recent document; match on `name`. Note also that the list response embeds each file's full
+  base64 content with no metadata-only mode, so listing downloads everything.
+
+### Changed
+
+- `searchSubscribers` now **throws a `TypeError` when `status` is given an array**, naming
+  `listAllSubscribers({ statuses })` as the fix. The two option names differ only by the plural, and
+  an array was previously stringified into `Active,Closed,Inactive` — one unrecognised status,
+  rejected in-band at HTTP 200 as `10PARWS0018 "Find Customer has been failed."`, which is slow to
+  diagnose from the wire.
+
+- `quotePdfBytes` and the new `invoicePdfBytes` / `subscriberDocumentBytes` now share one base64
+  decoder. The validation is the entire value of these functions, and two copies of it eventually
+  become two different amounts of validation.
+
 ## [0.2.0] — 2026-09-02
 
 ### Added

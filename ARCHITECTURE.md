@@ -15,7 +15,7 @@ src/
   attributes.ts   Custom-field group <-> link mapping. Pure.
   linkIndex.ts    buildLinkIndex — a pure function over an array of subscribers.
   usage.ts        Usage-subscription reconciliation. Pure — fetches nothing, writes nothing.
-  invoice.ts      Invoice detail: flatten, reconcile, compare calls. Pure.
+  invoice.ts      Invoice detail: flatten, reconcile, compare calls, per-tax totals. Pure.
   gather.ts       The one orchestrator: reads what usage.ts needs. The only I/O outside the clients.
   index.ts        The barrel. Explicit named exports only.
   testkit.ts      Recording mock fetch. Build-excluded, never shipped.
@@ -171,6 +171,77 @@ counts exactly that difference.
 itself, which a replayed feed can cause with no earlier invoice involved. Genuine repeats exist —
 a call rated as two legs — so it returns the rows and whether their `eventId`s differ, rather than
 a verdict.
+
+## Tax lives at two depths, and absent is not zero
+
+Tax components hang off `taxLineItem.lineItems` — the third thing in the invoice document named
+some variant of "line item". They appear in **two different places**:
+
+- on a **charge line**, for recurring and one-time charges;
+- on **each individual call**, for usage — because a usage rollup has no `taxLineItem` node of its
+  own and carries the sum of its calls' tax as its `taxAmount`.
+
+Collect from one depth and you miss the other. `flattenInvoice` collects from both into
+`FlatInvoice.taxes`, aggregated per (description, groupCode, code) rather than itemised, because an
+invoice with ten thousand calls would otherwise produce tens of thousands of near-identical rows to answer
+a question that is always "how much of tax X did this invoice carry".
+
+`reconcileInvoice`'s `taxBalanced` checks the collected components against each charge line's own
+`taxAmount` and against the invoice's stated tax total. It deliberately does **not** use each line's
+`taxLineItem.totalTax`, which is the obvious control and the wrong one: a usage rollup has no
+`totalTax`, so a check built on it silently omits every metered charge's tax — and then agrees with
+a component walk that made exactly the same omission. A cross-check whose two sides share a blind
+spot certifies the wrong answer.
+
+**`InvoiceCall.taxAmount` is `undefined` when a call carries no tax record, never `0`.** The two are
+different facts. On a live catch-up invoice, well over a thousand billed calls had no tax element at all while
+identically-priced calls in the same months were taxed normally — a tax-engine failure that reads as
+"taxed at zero" the moment anyone writes `?? 0`. `InvoiceCall.taxed` reports the node's presence so
+the distinction survives even for a caller who only reads the number.
+
+## Exemption is an account fact; jurisdiction is not on it
+
+`Subscriber.taxExemptionCode` is **absent** when an account has none — most on a live tenant —
+so presence is the test, not truthiness. Its shape invites a specific bug: a **singular** `code` key
+holds the array, and every element also has a `code`, so the value is at
+`taxExemptionCode.code[].code` and a read one level short returns an array where a string was
+expected without erroring.
+
+The codes are the tax vendor's vocabulary, extended per tenant, and **not always numeric** — `TF`
+was observed beside two-digit codes. `taxExemptionCodesOf` returns them and interprets nothing: a
+convenience like `isSalesTaxExempt()` would bake one jurisdiction's meanings into a general-purpose
+library, which is rule 4 of CONTRIBUTING applied outside the link codec.
+
+**A code entry carries no jurisdiction** — its only keys are `code` and `description` — while which
+codes an account needs is entirely jurisdictional. Live: Indiana accounts carried a single sales-tax
+code, Michigan accounts carried use-tax codes, a Florida account carried six including excise and
+gross-receipts codes with no Midwest equivalent. So the jurisdiction has to come from the account's
+addresses, which are a **list** with their own per-address `isSkipTax`. `taxJurisdictionsOf` returns
+those states, and an invoice's `taxTotalsByJurisdiction` returns the jurisdictions it was actually
+taxed in; the audit question — "is this account exempt where it should be" — is the join of the two.
+
+`isSkipTax` is the field that looks like the answer and is not: `false` on every account and every
+address across that tenant, including all 12 genuinely exempt ones.
+
+## Documents: `type` stopped being returned
+
+`GET /subscribers/{acct}/documents` returns hand-uploaded attachments — contracts, exemption
+certificates, receipts. No generated artefact is stored there, not even invoices, so it is an
+attachment repository rather than a document archive.
+
+Two shapes matter. `documents` is **absent, not an empty array**, when an account holds none — 47 of
+the accounts on a live tenant — so `res.documents.length` throws on the majority case.
+
+And `type` cannot be trusted. The upload form marks Document Type required, yet across a live tenant
+every document uploaded from 2025-05-12 onward came back with **no `type` field**, while every one
+uploaded through 2024-11-22 carried it — a clean split with zero overlap. It
+tracks neither the type chosen nor the visibility flag; a document uploaded as an external
+`Contract` came back untyped just as an internal `Supporting Document` did. So
+`filter(d => d.type === 'Supporting Document')` drops every recent document, which is exactly where
+current exemption certificates are. Match on `name`.
+
+The list response also embeds each file's full base64 content with no metadata-only mode, so a
+tenant-wide sweep downloads every attachment.
 
 ## The status filter, and the second silent omission
 

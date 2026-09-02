@@ -122,6 +122,25 @@ export interface InvoiceCall {
   productCode?: string;
   priceplanName?: string;
   /**
+   * What this call was taxed, or `undefined` when the call carries **no tax record at all**.
+   *
+   * The distinction is load-bearing and must not be collapsed with `?? 0`. A call taxed at zero and
+   * a call the tax engine never returned a result for look identical once both read `0`, and the
+   * second is a real defect: on a live catch-up invoice, well over a thousand billed calls had no tax element
+   * whatsoever while identically-priced calls in the same months were taxed normally. See
+   * {@link InvoiceCall.taxed}.
+   */
+  taxAmount?: number;
+  /**
+   * Whether this call carries a tax record at all — the presence of the `taxLineItem` node, not
+   * whether the amount is non-zero.
+   *
+   * `taxed: false` with a customer who holds an exemption code is expected; `taxed: false` with no
+   * exemption is a tax the invoice should have carried. Answering which needs
+   * `taxExemptionCodesOf` on the subscriber, which is why the two live in the same release.
+   */
+  taxed: boolean;
+  /**
    * Every CDR attribute, verbatim. Keys observed: `SERVICE_TYPE`, `EVENT_TYPE`, `EVENT_SUB_TYPE`,
    * `SOURCE`, `DESTINATION`, `BILLED_TO_NUMBER`, `CHARGE_CATEGORY`, `RATED_QUANTITY`,
    * `QUANTITY_2`, `TIME_CODE`, `EVENT_CATEGORY`, `CHARGE_CATEGORY_GROUP`. Treat that list as a
@@ -151,6 +170,39 @@ export interface InvoiceChargeLine {
   usageAmount: number;
   /** How many calls sit under this line. */
   callCount: number;
+  /**
+   * This line's own named tax components.
+   *
+   * **Empty on a usage rollup**, and that is the API's shape rather than an omission here: a rollup
+   * has no `taxLineItem` node of its own, and its components live on the individual calls beneath
+   * it. Its {@link InvoiceChargeLine.taxAmount} is still the correct total for the line. Use
+   * {@link FlatInvoice.taxes} to ask what a whole invoice paid in a given tax, since that is
+   * collected from both places.
+   */
+  taxLines: InvoiceTaxLine[];
+}
+
+/**
+ * One named tax component — a `taxLineItem.lineItems` entry.
+ *
+ * `taxLineItem.lineItems` is the **third** thing in this document named some variant of "line
+ * item", after the charge lines and the rated calls. {@link flattenInvoice} walks past it by
+ * position when collecting charges, and descends into it deliberately when collecting tax; those
+ * are not contradictory, and a reader who sees only one of them will think the other is a bug.
+ */
+export interface InvoiceTaxLine {
+  /** e.g. `STATE USE TAX`, `FEDERAL UNIVERSAL SERVICE FUND`. The name to group by. */
+  description?: string;
+  amount: number;
+  /** The tax vendor's numeric code, e.g. `060`. A string; do not assume it is numeric. */
+  code?: string;
+  /**
+   * The jurisdiction, e.g. `IN`, `MI`. Comparable with a subscriber address's `state`, which is
+   * what lets an exemption be checked against the state it is supposed to apply in.
+   */
+  groupCode?: string;
+  /** The rating engine that produced it, e.g. `SureTax`. */
+  taxConfig?: string;
 }
 
 /** An account-level surcharge - `billTimeLineItems.chargeLineItems`, outside the charge lines. */
@@ -178,6 +230,19 @@ export interface FlatInvoice {
   surcharges: InvoiceSurcharge[];
   /** Every rated call on the invoice, across every account, subscription and usage group. */
   calls: InvoiceCall[];
+  /**
+   * Every named tax on the invoice, **aggregated** — one entry per distinct
+   * (description, groupCode, code), with `amount` summed across every charge line and every call.
+   *
+   * Aggregated rather than itemised on purpose. The components are collected from two different
+   * depths (charge lines for recurring, individual calls for usage), and an invoice with 13,000
+   * calls would otherwise produce tens of thousands of near-identical rows to answer a question
+   * that is always "how much of tax X did this invoice carry".
+   */
+  taxes: InvoiceTaxLine[];
+  /** The tax total the invoice states for itself, when it reports one. `reconcileInvoice` checks
+   *  the collected components against it. */
+  statedTaxTotal?: number;
 }
 
 /** Lift the CDR attributes out of whichever shape they arrived in. */
@@ -210,6 +275,39 @@ function readAttributes(raw: Rec): Record<string, string> {
   return out;
 }
 
+/**
+ * The named tax components hanging off a charge line or a call.
+ *
+ * This is the one place that deliberately descends into `taxLineItem.lineItems` — the node
+ * {@link flattenInvoice} skips when collecting charges. Both are correct: it is a tax component
+ * there and never a charge, and it is the only source of per-tax detail here.
+ */
+function readTaxLines(raw: Rec): InvoiceTaxLine[] {
+  const out: InvoiceTaxLine[] = [];
+  for (const tli of arr(raw.taxLineItem)) {
+    for (const line of arr(tli.lineItems)) {
+      out.push({
+        description: str(line.description),
+        amount: num(line.taxAmount),
+        code: str(line.code),
+        groupCode: str(line.groupCode),
+        taxConfig: str(line.taxConfig),
+      });
+    }
+  }
+  return out;
+}
+
+/** Fold tax components into the invoice-level aggregate, keyed by what distinguishes them. */
+function accumulateTax(into: Map<string, InvoiceTaxLine>, lines: readonly InvoiceTaxLine[]): void {
+  for (const line of lines) {
+    const key = `${line.description ?? ''}\u0000${line.groupCode ?? ''}\u0000${line.code ?? ''}`;
+    const existing = into.get(key);
+    if (existing) existing.amount += line.amount;
+    else into.set(key, { ...line });
+  }
+}
+
 function readCall(raw: Rec, eventName: string | undefined): InvoiceCall {
   const attributes = readAttributes(raw);
   return {
@@ -235,6 +333,10 @@ function readCall(raw: Rec, eventName: string | undefined): InvoiceCall {
     productName: str(raw.productName),
     productCode: str(raw.productCode),
     priceplanName: str(raw.priceplanName),
+    taxAmount: optNum(raw.taxAmount),
+    // Presence of the node, not a non-zero amount: a call taxed at zero and a call the tax engine
+    // never answered for are different facts, and only this distinguishes them.
+    taxed: raw.taxLineItem !== undefined && raw.taxLineItem !== null,
     attributes,
   };
 }
@@ -250,6 +352,7 @@ export function flattenInvoice(detail: InvoiceDetail): FlatInvoice {
   const chargeLines: InvoiceChargeLine[] = [];
   const surcharges: InvoiceSurcharge[] = [];
   const calls: InvoiceCall[] = [];
+  const taxIndex = new Map<string, InvoiceTaxLine>();
 
   for (const account of arr(detail.accountInvoiceElements)) {
     for (const sur of arr((account.billTimeLineItems as Rec | undefined)?.chargeLineItems)) {
@@ -270,9 +373,14 @@ export function flattenInvoice(detail: InvoiceDetail): FlatInvoice {
             const eventName = str(usage.eventName);
             for (const call of arr(usage.lstLineItems)) {
               calls.push(readCall(call, eventName));
+              // A usage rollup has no taxLineItem of its own; its components are down here.
+              accumulateTax(taxIndex, readTaxLines(call));
               callCount++;
             }
           }
+
+          const lineTaxLines = readTaxLines(line);
+          accumulateTax(taxIndex, lineTaxLines);
 
           chargeLines.push({
             description: str(line.description) ?? str(line.chargeDescription),
@@ -286,6 +394,7 @@ export function flattenInvoice(detail: InvoiceDetail): FlatInvoice {
             isUsageRollup: usageGroups.length > 0,
             usageAmount,
             callCount,
+            taxLines: lineTaxLines,
           });
         }
       }
@@ -303,7 +412,43 @@ export function flattenInvoice(detail: InvoiceDetail): FlatInvoice {
     chargeLines,
     surcharges,
     calls,
+    taxes: [...taxIndex.values()],
+    statedTaxTotal: optNum(
+      (detail.enhancedAccountSummary as Rec | undefined)?.currentInvoice?.taxes,
+    ),
   };
+}
+
+/**
+ * Total per named tax across the whole invoice, e.g. `STATE USE TAX` -> 10.4.
+ *
+ * Collected from both depths — charge lines for recurring, individual calls for usage — so it
+ * answers "what did this invoice pay in tax X" without the caller re-solving the walk.
+ */
+export function taxTotalsByDescription(flat: FlatInvoice): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const line of flat.taxes) {
+    const k = line.description ?? '';
+    out.set(k, (out.get(k) ?? 0) + line.amount);
+  }
+  return out;
+}
+
+/**
+ * Total tax per jurisdiction, from each component's `groupCode` (e.g. `IN`, `MI`).
+ *
+ * The counterpart to `taxJurisdictionsOf` on a subscriber: an exemption is granted per state, and
+ * which codes an account needs depends on the state, so checking that an exemption did what it
+ * should means comparing the states the account has addresses in against the jurisdictions its
+ * invoice was actually taxed in. Components with no `groupCode` are grouped under `''`.
+ */
+export function taxTotalsByJurisdiction(flat: FlatInvoice): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const line of flat.taxes) {
+    const k = line.groupCode ?? '';
+    out.set(k, (out.get(k) ?? 0) + line.amount);
+  }
+  return out;
 }
 
 /** The result of checking a flattened invoice against the totals OneBill states on it. */
@@ -339,6 +484,24 @@ export interface InvoiceReconciliation {
    * where the invoice-level check still passes because the rollup is intact.
    */
   usageBalanced: boolean;
+  /** Sum of every named tax component collected into {@link FlatInvoice.taxes}. */
+  taxLineTotal: number;
+  /**
+   * Sum of each charge line's own `taxAmount` — the authoritative per-line total, and the right
+   * thing to check the components against.
+   *
+   * Note this is NOT the sum of each line's `taxLineItem.totalTax`: a usage rollup has no
+   * `taxLineItem` node at all, so a control built on `totalTax` silently omits every metered
+   * charge's tax and then agrees with a component walk that made the same omission.
+   */
+  chargeTaxTotal: number;
+  /** The tax total the invoice states for itself, when it reports one. */
+  statedTaxTotal: number | undefined;
+  /**
+   * True when the collected components equal the charge lines' own tax, and equal the invoice's
+   * stated tax where it reports one. False means a tax component was missed or double-counted.
+   */
+  taxBalanced: boolean;
 }
 
 /** Within a cent - the tolerance for a total assembled from two-decimal amounts. */
@@ -362,6 +525,13 @@ export function reconcileInvoice(flat: FlatInvoice): InvoiceReconciliation {
   const callTotal = flat.calls.reduce((s, c) => s + c.amount, 0);
   const usageRollupTotal = flat.chargeLines.reduce((s, l) => s + l.usageAmount, 0);
 
+  const taxLineTotal = flat.taxes.reduce((s, t) => s + t.amount, 0);
+  const chargeTaxTotal = flat.chargeLines.reduce((s, l) => s + (l.taxAmount ?? 0), 0);
+  const statedTaxTotal = flat.statedTaxTotal;
+  const taxBalanced =
+    Math.abs(taxLineTotal - chargeTaxTotal) < CENT &&
+    (statedTaxTotal === undefined || Math.abs(taxLineTotal - statedTaxTotal) < CENT);
+
   return {
     chargeLineCount: flat.chargeLines.length,
     callCount: flat.calls.length,
@@ -376,6 +546,10 @@ export function reconcileInvoice(flat: FlatInvoice): InvoiceReconciliation {
     usageRollupTotal,
     usageDelta: callTotal - usageRollupTotal,
     usageBalanced: Math.abs(callTotal - usageRollupTotal) < CENT,
+    taxLineTotal,
+    chargeTaxTotal,
+    statedTaxTotal,
+    taxBalanced,
   };
 }
 

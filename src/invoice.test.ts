@@ -5,6 +5,8 @@ import {
   flattenInvoice,
   invoiceCallKey,
   reconcileInvoice,
+  taxTotalsByDescription,
+  taxTotalsByJurisdiction,
   type InvoiceCall,
 } from './invoice.js';
 import { fakeCallRecord, fakeInvoiceDetail } from './testkit.js';
@@ -206,6 +208,8 @@ function call(over: Partial<InvoiceCall> = {}): InvoiceCall {
     amount: 0.05,
     attributes: {},
     ...over,
+    // Spreading a Partial would widen this to `boolean | undefined`; the field is not optional.
+    taxed: over.taxed ?? false,
   };
 }
 
@@ -294,5 +298,142 @@ describe('findRepeatedCalls', () => {
         call({ eventId: 'B', isoEventDate: '2026-01-16 09:30:00' }),
       ]),
     ).toEqual([]);
+  });
+});
+
+describe('tax on a flattened invoice', () => {
+  const withTax = () =>
+    detail({
+      recurringAmount: 100,
+      calls: [
+        fakeCallRecord({
+          amount: 0.5,
+          tax: [
+            { description: 'FEDERAL UNIVERSAL SERVICE FUND', amount: 0.05, groupCode: 'IN' },
+            { description: 'STATE USE TAX', amount: 0.02, groupCode: 'IN' },
+          ],
+        }),
+        fakeCallRecord({
+          amount: 0.25,
+          tax: [{ description: 'FEDERAL UNIVERSAL SERVICE FUND', amount: 0.03, groupCode: 'IN' }],
+        }),
+      ],
+    });
+
+  it('collects tax components from calls, which is where a usage rollup keeps them', () => {
+    const flat = flattenInvoice(withTax());
+    const byName = new Map(flat.taxes.map((t) => [`${t.description}|${t.groupCode}`, t.amount]));
+    expect(byName.get('FEDERAL UNIVERSAL SERVICE FUND|IN')).toBeCloseTo(0.08, 10);
+    expect(byName.get('STATE USE TAX|IN')).toBeCloseTo(0.02, 10);
+  });
+
+  it('leaves a usage rollup with no taxLines of its own', () => {
+    // Not an omission: the API gives a rollup no taxLineItem node. Its components are on the calls.
+    const rollup = flattenInvoice(withTax()).chargeLines.find((l) => l.isUsageRollup)!;
+    expect(rollup.taxLines).toEqual([]);
+  });
+
+  it('marks a call with a tax record as taxed, and one without as not', () => {
+    const flat = flattenInvoice(
+      detail({
+        calls: [
+          fakeCallRecord({ amount: 0.5, tax: [{ description: 'STATE USE TAX', amount: 0.02 }] }),
+          fakeCallRecord({ amount: 0.05 }), // no tax node at all
+        ],
+      }),
+    );
+    expect(flat.calls[0]!.taxed).toBe(true);
+    expect(flat.calls[0]!.taxAmount).toBeCloseTo(0.02, 10);
+    expect(flat.calls[1]!.taxed).toBe(false);
+    // undefined, NOT 0 — the two mean different things and `?? 0` would erase the difference.
+    expect(flat.calls[1]!.taxAmount).toBeUndefined();
+  });
+
+  it('distinguishes a call taxed at zero from a call with no tax record', () => {
+    const flat = flattenInvoice(
+      detail({
+        calls: [
+          fakeCallRecord({ amount: 0.05, tax: [{ description: 'STATE USE TAX', amount: 0 }] }),
+          fakeCallRecord({ amount: 0.05 }),
+        ],
+      }),
+    );
+    expect(flat.calls[0]!.taxed).toBe(true);
+    expect(flat.calls[0]!.taxAmount).toBe(0);
+    expect(flat.calls[1]!.taxed).toBe(false);
+    expect(flat.calls[1]!.taxAmount).toBeUndefined();
+  });
+
+  it('totals tax by name and by jurisdiction', () => {
+    const flat = flattenInvoice(
+      detail({
+        calls: [
+          fakeCallRecord({
+            amount: 0.5,
+            tax: [
+              { description: 'STATE USE TAX', amount: 0.1, groupCode: 'MI' },
+              { description: 'STATE USE TAX', amount: 0.2, groupCode: 'IN' },
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(taxTotalsByDescription(flat).get('STATE USE TAX')).toBeCloseTo(0.3, 10);
+    expect(taxTotalsByJurisdiction(flat).get('MI')).toBeCloseTo(0.1, 10);
+    expect(taxTotalsByJurisdiction(flat).get('IN')).toBeCloseTo(0.2, 10);
+  });
+
+  it('keeps two jurisdictions apart even under the same tax name', () => {
+    // Aggregating on description alone would merge MI and IN use tax into one untraceable figure.
+    const flat = flattenInvoice(
+      detail({
+        calls: [
+          fakeCallRecord({
+            amount: 0.5,
+            tax: [
+              { description: 'STATE USE TAX', amount: 0.1, groupCode: 'MI' },
+              { description: 'STATE USE TAX', amount: 0.2, groupCode: 'IN' },
+            ],
+          }),
+        ],
+      }),
+    );
+    const useTax = flat.taxes.filter((t) => t.description === 'STATE USE TAX');
+    expect(useTax).toHaveLength(2);
+    expect(useTax.map((t) => t.groupCode).sort()).toEqual(['IN', 'MI']);
+  });
+});
+
+describe('reconcileInvoice tax checks', () => {
+  it('balances when the components equal the charge lines own tax', () => {
+    const flat = flattenInvoice(
+      detail({
+        calls: [
+          fakeCallRecord({ amount: 0.5, tax: [{ description: 'STATE USE TAX', amount: 0.07 }] }),
+        ],
+      }),
+    );
+    // The fixture's recurring line carries taxAmount 5 with a matching component.
+    const r = reconcileInvoice(flat);
+    expect(r.taxLineTotal).toBeCloseTo(r.chargeTaxTotal, 10);
+    expect(r.taxBalanced).toBe(true);
+  });
+
+  it('reports NOT tax-balanced when a component is lost', () => {
+    const flat = flattenInvoice(
+      detail({
+        calls: [
+          fakeCallRecord({ amount: 0.5, tax: [{ description: 'STATE USE TAX', amount: 0.07 }] }),
+        ],
+      }),
+    );
+    flat.taxes.pop();
+    expect(reconcileInvoice(flat).taxBalanced).toBe(false);
+  });
+
+  it('reports NOT tax-balanced when the invoice states a different tax total', () => {
+    const flat = flattenInvoice(detail());
+    flat.statedTaxTotal = 999;
+    expect(reconcileInvoice(flat).taxBalanced).toBe(false);
   });
 });

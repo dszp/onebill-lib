@@ -402,6 +402,86 @@ Prefer `getInvoiceDetail` — the XML for a large invoice runs to tens of megaby
 **Large invoices are large.** An invoice carrying a year of recovered usage took ~20 seconds to
 return and held over ten thousand calls. Budget for it, particularly in a Worker.
 
+## Tax: exemptions, and what an invoice was actually taxed
+
+The published OpenAPI carries no tax or exemption paths at all. Everything here was established
+against a live tenant.
+
+### What an account is exempt from
+
+```ts
+import { taxExemptionCodesOf, taxJurisdictionsOf } from '@dszp/onebill-lib';
+
+const account = await client.getSubscriber('CLI00000');
+taxExemptionCodesOf(account);   // [{ code: '32', description: 'State and Local Sales Tax Exempt' }]
+taxJurisdictionsOf(account);    // ['IN'] — the states this account has addresses in
+```
+
+`taxExemptionCode` is **absent** when an account has no exemption, not empty — test presence, not
+truthiness. Use the accessor rather than walking it: a **singular** `code` key holds the array and
+every element also has a `code`, so the value is at `taxExemptionCode.code[].code` and reaching one
+level short yields an array where a string was expected, silently.
+
+**Codes are strings, are extended per tenant, and are not always numeric** (`TF` alongside two-digit
+codes). The library does not interpret them, deliberately — that is your configuration, not its API.
+
+**Which codes an account needs depends on its state,** and the codes carry no jurisdiction of their
+own. Live: Indiana accounts carried one sales-tax code, Michigan accounts carried use-tax codes, and
+a Florida account carried six with no Midwest equivalent. That is what `taxJurisdictionsOf` is for.
+
+`isSkipTax` looks like the exemption switch and is not — it was `false` on every account and every
+address across a tenant where a minority of accounts were genuinely exempt.
+
+### What an invoice was taxed
+
+```ts
+import { flattenInvoice, taxTotalsByDescription, taxTotalsByJurisdiction } from '@dszp/onebill-lib';
+
+const flat = flattenInvoice(await client.getInvoiceDetail('INV00000'));
+taxTotalsByDescription(flat).get('STATE USE TAX');   // 238.61
+taxTotalsByJurisdiction(flat).get('MI');             // 759.86
+```
+
+Tax components live at **two different depths** — on the charge line for recurring charges, and on
+the individual calls for usage, because a usage rollup has no `taxLineItem` node and carries the sum
+of its calls' tax as its own `taxAmount`. `FlatInvoice.taxes` collects both, aggregated per
+(description, jurisdiction, code). Check it with `reconcileInvoice(flat).taxBalanced`.
+
+### Untaxed is not the same as taxed at zero
+
+```ts
+flat.calls.filter((c) => c.amount > 0 && !c.taxed);   // billed, but carrying NO tax record
+```
+
+`InvoiceCall.taxAmount` is `undefined` — never `0` — when a call has no tax record. **Do not write
+`taxAmount ?? 0`**: it erases the distinction between a call taxed at zero and a call the tax engine
+never answered for, and the second is a real defect. On one live invoice, well over a thousand billed calls had no
+tax element while identically-priced calls in the same months were taxed normally. Deciding whether
+that is an exemption or a failure needs the account's exemption codes, which is why both surfaces
+ship together.
+
+## Documents
+
+```ts
+import { subscriberDocumentBytes } from '@dszp/onebill-lib';
+
+const docs = await client.getSubscriberDocuments('CLI00000');
+const cert = docs.find((d) => /exempt/i.test(d.name ?? ''));
+if (cert) writeFileSync(`${cert.name}.pdf`, subscriberDocumentBytes(cert));
+```
+
+Contracts, exemption certificates, receipts. Hand-uploaded attachments only — no generated artefact
+is stored here, not even invoices.
+
+**Match on `name`, not `type`.** `type` is required by the upload form but is missing from the API
+response for every document uploaded to a live tenant since 2025-05-12, while every one uploaded
+through 2024-11-22 carried it — a clean split, independent of the type chosen and of visibility.
+Filtering on it drops every recent document.
+
+`documents` is absent rather than empty when an account has none, which `getSubscriberDocuments`
+normalises to `[]`. Note the list response embeds every file's full base64 content and offers no
+metadata-only mode, so listing downloads everything — fetch per account rather than sweeping.
+
 ## Develop
 
 ```

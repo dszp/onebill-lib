@@ -12,6 +12,8 @@ import type {
   QuoteDocument,
   QuoteDocumentResponse,
   Subscriber,
+  SubscriberDocument,
+  SubscriberDocumentsResponse,
   SubscriberSearchOptions,
   SubscriberSearchPage,
   Subscription,
@@ -151,6 +153,18 @@ export class OneBillReadClient {
    * than erroring.
    */
   async searchSubscribers(opts: SubscriberSearchOptions = {}): Promise<SubscriberSearchPage> {
+    // `status` takes ONE status; `listAllSubscribers` takes `statuses` (plural) and merges. The two
+    // option names differ only by that plural, and an array reaching here is stringified into
+    // `Active,Closed,Inactive` — a single unrecognised status, which the server rejects in-band at
+    // HTTP 200 with `10PARWS0018 "Find Customer has been failed."`. That is a loud enough error to
+    // notice and a slow enough one to diagnose, so name the fix at the point of the mistake.
+    if (Array.isArray(opts.status)) {
+      throw new TypeError(
+        'searchSubscribers({ status }) takes a single status string. For several statuses use ' +
+          'listAllSubscribers({ statuses: [...] }), which queries each in turn and merges.',
+      );
+    }
+
     return this.#http.request<SubscriberSearchPage>('GET', '/rest/SubscriberService/v1/subscribers', {
       query: {
         searchBy: opts.searchBy,
@@ -299,6 +313,29 @@ export class OneBillReadClient {
       `/rest/SubscriberService/v1/subscribers/${assertPathSegment(accountNumber, 'account number')}/subscriptions`,
     );
     return res.subscriptions ?? [];
+  }
+
+  /**
+   * The files attached to a subscriber — contracts, tax exemption certificates, receipts.
+   *
+   * **The response omits `documents` entirely when an account has none** rather than returning an
+   * empty array; roughly half the accounts on a live tenant did. This normalises that to `[]`.
+   *
+   * **Every call downloads every file.** The list response carries each document's full base64
+   * `content` inline, with no metadata-only mode — a sweep across that tenant moved tens of megabytes, and a
+   * single attachment reached several megabytes. Fetch per account rather than sweeping, unless you mean it.
+   *
+   * Note {@link SubscriberDocument.type} is unreliable and filtering on it loses documents; see
+   * that field. Decode a file with `subscriberDocumentBytes`.
+   */
+  async getSubscriberDocuments(accountNumber: string): Promise<SubscriberDocument[]> {
+    const res = await this.#http.request<SubscriberDocumentsResponse>(
+      'GET',
+      `/rest/SubscriberService/v1/subscribers/${assertPathSegment(accountNumber, 'account number')}/documents`,
+    );
+    const raw = res.documents;
+    if (raw === undefined || raw === null) return [];
+    return Array.isArray(raw) ? raw : [raw];
   }
 
   /**

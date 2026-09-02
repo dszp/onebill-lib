@@ -511,3 +511,64 @@ describe('getInvoicePdf', () => {
     await expect(client(mock).getInvoicePdf('INV00000')).rejects.toThrow(/No invoice PDF payload/);
   });
 });
+
+describe('getSubscriberDocuments', () => {
+  it('reads the attachments for one account', async () => {
+    const mock = mockFetch({
+      responses: [{ body: { documents: [{ id: 1, name: 'StateUseTaxExemption' }], status: 'OK' } }],
+    });
+    const docs = await client(mock).getSubscriberDocuments('CLI00000');
+    expect(docs).toHaveLength(1);
+    expect(docs[0]!.name).toBe('StateUseTaxExemption');
+    expect(mock.apiCalls[0]!.url).toBe(
+      `${B}/rest/SubscriberService/v1/subscribers/CLI00000/documents`,
+    );
+  });
+
+  it('returns [] when the account has none — the key is ABSENT, not an empty array', async () => {
+    // roughly half the accounts on a live tenant omitted `documents` entirely, so `res.documents.length`
+    // throws on the majority case.
+    const mock = mockFetch({ responses: [{ body: { status: 'OK', isAgent: false } }] });
+    await expect(client(mock).getSubscriberDocuments('CLI00000')).resolves.toEqual([]);
+  });
+
+  it('accepts a single document sent unwrapped', async () => {
+    const mock = mockFetch({ responses: [{ body: { documents: { id: 1, name: 'Contract' } } }] });
+    const docs = await client(mock).getSubscriberDocuments('CLI00000');
+    expect(docs).toHaveLength(1);
+    expect(docs[0]!.name).toBe('Contract');
+  });
+
+  it('encodes an awkward account number', async () => {
+    const mock = mockFetch({ responses: [{ body: {} }] });
+    await client(mock).getSubscriberDocuments('a b/c');
+    expect(mock.apiCalls[0]!.url).toBe(
+      `${B}/rest/SubscriberService/v1/subscribers/a%20b%2Fc/documents`,
+    );
+  });
+
+  it('rejects an account number that would resolve to another endpoint', async () => {
+    const mock = mockFetch({ responses: [{ body: {} }] });
+    await expect(client(mock).getSubscriberDocuments('..')).rejects.toThrow(/different endpoint/);
+    expect(mock.apiCalls).toHaveLength(0);
+  });
+});
+
+describe('searchSubscribers status guard', () => {
+  it('rejects an array and names listAllSubscribers({ statuses }) as the fix', async () => {
+    // `status` and `statuses` differ only by the plural. An array reaching the query is stringified
+    // to `Active,Closed,Inactive` and comes back as an in-band 10PARWS0018 at HTTP 200, which is a
+    // slow thing to diagnose from the wire.
+    const mock = mockFetch({ responses: [{ body: { subscriber: [] } }] });
+    await expect(
+      client(mock).searchSubscribers({ status: SUBSCRIBER_STATUSES as unknown as string }),
+    ).rejects.toThrow(/listAllSubscribers\(\{ statuses/);
+    expect(mock.apiCalls).toHaveLength(0);
+  });
+
+  it('still accepts a single status string', async () => {
+    const mock = mockFetch({ responses: [{ body: { subscriber: [] } }] });
+    await client(mock).searchSubscribers({ status: 'Closed' });
+    expect(new URL(mock.apiCalls[0]!.url).searchParams.get('status')).toBe('Closed');
+  });
+});

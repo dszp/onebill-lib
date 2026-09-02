@@ -151,6 +151,8 @@ export function fakeCallRecord(
     ratedQuantity?: string;
     amount?: number;
     chargeCategory?: string;
+    /** Attach named tax components. Omit for a call with NO tax record at all. */
+    tax?: { description: string; amount: number; code?: string; groupCode?: string }[];
   } = {},
 ): Record<string, unknown> {
   const {
@@ -163,7 +165,7 @@ export function fakeCallRecord(
     chargeCategory = 'Toll Free Orig',
   } = over;
 
-  return {
+  const base: Record<string, unknown> = {
     eventId,
     isoEventDate,
     eventDate: '01/15/26 09:30:00 AM',
@@ -186,6 +188,85 @@ export function fakeCallRecord(
       { key: 'TIME_CODE', value: 'Standard' },
       { key: 'CHARGE_CATEGORY_GROUP', value: 'Toll Free Calls' },
     ],
+  };
+
+  // Tax is attached ONLY when asked for. A call with no `taxLineItem` node is a real and common
+  // shape — the tax engine returns nothing for some rows — and the library must keep it distinct
+  // from a call taxed at zero, so the fixture has to be able to produce both.
+  if (over.tax !== undefined) {
+    base.taxAmount = over.tax.reduce((sum, t) => sum + t.amount, 0);
+    base.taxLineItem = {
+      totalTax: over.tax.reduce((sum, t) => sum + t.amount, 0),
+      lineItems: over.tax.map((t) => ({
+        description: t.description,
+        taxAmount: t.amount,
+        code: t.code ?? '060',
+        groupCode: t.groupCode ?? 'IN',
+        taxConfig: 'SureTax',
+      })),
+    };
+  }
+  return base;
+}
+
+/** A fictional subscriber carrying tax-exemption codes and addresses. */
+export function fakeExemptSubscriber(
+  over: {
+    codes?: { code: string; description?: string }[];
+    states?: string[];
+    /** Send the single code unwrapped, as a bare object rather than an array. */
+    unwrapped?: boolean;
+  } = {},
+): Record<string, unknown> {
+  const { codes = [{ code: '32', description: 'State and Local Sales Tax Exempt' }], states = ['IN'] } =
+    over;
+  return {
+    accountNumber: 'CLI00000',
+    accountName: 'Acme Division 1',
+    isSkipTax: false,
+    address: states.map((state, i) => ({
+      addLine1: `${100 + i} Example Street`,
+      city: 'Example City',
+      state,
+      zip: '00000',
+      country: 'UNITED STATES',
+      isSkipTax: false,
+      defaultBilling: i === 0,
+      id: 1000 + i,
+    })),
+    ...(codes.length
+      ? { taxExemptionCode: { code: over.unwrapped ? codes[0] : codes } }
+      : {}),
+  };
+}
+
+/** A fictional attached document. `type` is omitted unless asked for — the common wire shape. */
+export function fakeDocument(
+  over: {
+    name?: string;
+    type?: string;
+    contentType?: string;
+    content?: string;
+    internal?: boolean;
+  } = {},
+): Record<string, unknown> {
+  const {
+    name = 'StateUseTaxExemption',
+    contentType = 'PDF',
+    content = FAKE_PDF_BASE64,
+    internal = true,
+  } = over;
+  return {
+    id: 4471,
+    name,
+    number: '',
+    contentType,
+    content,
+    contentSize: 42,
+    isVisibilityInternal: internal,
+    uploadedOn: '2026-01-15T09:30:00-07:00',
+    uploadedBy: 'Alex Reseller',
+    ...(over.type === undefined ? {} : { type: over.type }),
   };
 }
 
@@ -262,6 +343,10 @@ export function fakeInvoiceDetail(
                     description: 'Usage Charges',
                     chargeType: 'Metered Charge',
                     amount: usageAmount,
+                    // A usage rollup carries the SUM of its calls' tax as its own `taxAmount` and
+                    // has no `taxLineItem` node — verified live. The fixture must match, or the
+                    // reconciliation's tax check has nothing real to test against.
+                    taxAmount: calls.reduce((sum, c) => sum + Number(c.taxAmount ?? 0), 0),
                     usageLineItem: [
                       { eventName: 'Origination Calls', amount: usageAmount, lstLineItems: calls },
                       { eventName: 'Termination Calls', amount: 0, lstLineItems: [] },

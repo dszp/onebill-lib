@@ -57,7 +57,125 @@ export interface Subscriber {
   id?: number;
   /** Present only on the single-record read, not on search rows. */
   subscriberId?: string;
+  /**
+   * Tax-treatment codes assigned to this account. **Absent entirely when the account has none** —
+   * not `null`, not an empty container — so test presence rather than truthiness. Undocumented:
+   * the published OpenAPI carries no tax or exemption paths at all.
+   *
+   * Note the shape: a **singular** `code` key holds the array, and every element ALSO has a `code`
+   * key. The value you want is at `taxExemptionCode.code[].code`, and reaching for `.code` one
+   * level short yields an array where a string was expected, silently. Use
+   * {@link taxExemptionCodesOf} rather than walking it.
+   */
+  taxExemptionCode?: TaxExemptionCodes;
+  /**
+   * Postal addresses. **A list** — an account can hold several, in different states, and each
+   * carries its own `isSkipTax`. See {@link SubscriberAddress}.
+   */
+  address?: SubscriberAddress[] | SubscriberAddress;
+  /**
+   * Account-level "do not tax this account" switch. **This is not the exemption mechanism**, and
+   * assuming it is will read every exempt account as taxable: across a live live tenant
+   * it was `false` on every account and on every address, while a minority of accounts carried genuine
+   * {@link Subscriber.taxExemptionCode} entries. Exemption is the code list; this is a separate,
+   * blunter flag.
+   */
+  isSkipTax?: boolean;
   [k: string]: any;
+}
+
+/** One tax-treatment code. */
+export interface TaxExemptionCode {
+  /**
+   * The code itself. **A string, and not always numeric** — `TF` has been observed alongside
+   * two-digit codes. Vendor-and-tenant vocabulary, extensible per instance, so never type this as
+   * a union or a number, and never branch on a specific value inside this library.
+   */
+  code: string;
+  /** OneBill's own label, e.g. `State and Local Sales Tax Exempt`. */
+  description?: string;
+  [k: string]: any;
+}
+
+/**
+ * The container for {@link Subscriber.taxExemptionCode}.
+ *
+ * The singular key name is the API's, not a mistake here. It is typed to accept a bare object as
+ * well as an array because a field named `code` holding a list invites a server to send one entry
+ * unwrapped; {@link taxExemptionCodesOf} normalises both.
+ */
+export interface TaxExemptionCodes {
+  code?: TaxExemptionCode[] | TaxExemptionCode;
+  [k: string]: any;
+}
+
+/** One postal address on a subscriber. */
+export interface SubscriberAddress {
+  addLine1?: string;
+  addLine2?: string;
+  city?: string;
+  /** Two-letter state code. Comparable with an invoice tax line's `groupCode`. */
+  state?: string;
+  zip?: string;
+  country?: string;
+  /** Per-address tax-skip flag, independent of the account-level one. */
+  isSkipTax?: boolean;
+  defaultBilling?: boolean;
+  defaultShipping?: boolean;
+  id?: number | string;
+  [k: string]: any;
+}
+
+/**
+ * The tax-treatment codes on a subscriber, normalised to a flat list.
+ *
+ * Returns `[]` when the account has none, which is the common case. Tolerates the container being
+ * absent, and a single entry arriving unwrapped instead of in an array.
+ *
+ * **The codes are not interpreted here, deliberately.** They are the tax vendor's vocabulary and
+ * are extended per tenant — a helper like `isSalesTaxExempt()` would bake one jurisdiction's
+ * meanings into a general-purpose library, which is the same rule that keeps namespace constants
+ * out of the link codec. Map codes to meaning in your own configuration.
+ *
+ * **Which codes an account carries depends on its state.** Observed live across one tenant:
+ * Indiana accounts carried a single sales-tax code; Michigan accounts carried use-tax codes;
+ * a Florida account carried six, including excise and gross-receipts codes with no Midwest
+ * equivalent. So a code set is only meaningful against the jurisdiction it applies to — see
+ * {@link taxJurisdictionsOf}.
+ */
+export function taxExemptionCodesOf(subscriber: Subscriber): TaxExemptionCode[] {
+  const container = subscriber?.taxExemptionCode;
+  if (container === undefined || container === null) return [];
+  const raw = container.code;
+  if (raw === undefined || raw === null) return [];
+  const list = Array.isArray(raw) ? raw : [raw];
+  return list.filter((e): e is TaxExemptionCode => {
+    return typeof e === 'object' && e !== null && typeof (e as TaxExemptionCode).code === 'string';
+  });
+}
+
+/**
+ * The distinct states this subscriber has an address in, upper-cased.
+ *
+ * The exemption codes themselves carry **no jurisdiction of their own** — verified live, the only
+ * keys on a code entry are `code` and `description`. The jurisdiction comes from the account's
+ * addresses, which is why this exists next to {@link taxExemptionCodesOf}: answering "is this
+ * account correctly exempt" needs the codes, the states, and the invoice's own per-jurisdiction tax
+ * lines together.
+ *
+ * Most accounts return one state. An account can span several, so this returns a list rather than
+ * a single value.
+ */
+export function taxJurisdictionsOf(subscriber: Subscriber): string[] {
+  const raw = subscriber?.address;
+  if (raw === undefined || raw === null) return [];
+  const list = Array.isArray(raw) ? raw : [raw];
+  const seen = new Set<string>();
+  for (const a of list) {
+    const st = typeof a?.state === 'string' ? a.state.trim().toUpperCase() : '';
+    if (st !== '') seen.add(st);
+  }
+  return [...seen];
 }
 
 /** One page of a subscriber search. */
@@ -347,6 +465,19 @@ function decodePdfBase64(b64: unknown, what: string): Uint8Array {
   return bytes;
 }
 
+/** Base64 to bytes, with no assertion about what the bytes are. */
+function decodeBase64(b64: string, what: string): Uint8Array {
+  let binary: string;
+  try {
+    binary = atob(b64);
+  } catch {
+    throw new Error(`${what} payload is not valid base64`);
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 /**
  * The order's state, from whichever field this particular response shape carries it in.
  *
@@ -523,6 +654,85 @@ export interface InvoiceDetail {
   enhancedAccountSummary?: Rec;
   accountSummary?: Rec;
   [k: string]: any;
+}
+
+/**
+ * A file attached to a subscriber — a contract, a tax exemption certificate, a receipt.
+ *
+ * This is an **attachment repository, not where OneBill's own rendered documents live**: every row
+ * observed across a live tenant was hand-uploaded, and no generated artefact appears here, not even
+ * invoices. Use `getInvoicePdf` for a rendered invoice.
+ */
+export interface SubscriberDocument {
+  /** OneBill's identifier for the attachment. */
+  id?: number | string;
+  /**
+   * The file name as uploaded, without an extension — e.g. `StateUseTaxExemption`.
+   *
+   * **In practice this is the only reliable handle on what a document is**, because
+   * {@link SubscriberDocument.type} is frequently absent. See that field.
+   */
+  name?: string;
+  /**
+   * The document category chosen at upload — `Contract`, `Supporting Document`, `Quote`, `Invoice`,
+   * `Receipt`, `Consent`.
+   *
+   * **Absent far more often than you would expect, and filtering on it loses documents.** The
+   * upload form marks it required, yet a quarter of the rows across a live tenant came back with no `type`
+   * at all. Every internally-visible document lacked it, and some externally-visible ones did too —
+   * so `type` missing does not even reliably mean "internal".
+   *
+   * The practical consequence: `documents.filter(d => d.type === 'Supporting Document')` silently
+   * omits every internal document, which is exactly where tax exemption certificates tend to be
+   * filed. Match on {@link SubscriberDocument.name} instead, and treat `type` as a hint.
+   */
+  type?: string;
+  /** A free-text reference entered at upload. Optional in the form and usually empty. */
+  number?: string;
+  /** Format label, e.g. `PDF`. Not a MIME type. */
+  contentType?: string;
+  /** The file itself, base64-encoded. Decode with {@link subscriberDocumentBytes}. */
+  content?: string;
+  /** Size in bytes, as OneBill reports it. */
+  contentSize?: number | string;
+  /** Whether the document is marked internal-only in the portal. */
+  isVisibilityInternal?: boolean;
+  uploadedOn?: string;
+  uploadedBy?: string;
+  [k: string]: any;
+}
+
+/**
+ * The envelope the subscriber-documents endpoint returns.
+ *
+ * **`documents` is absent, not empty, when the account has none** — roughly half the accounts on a live
+ * tenant omitted the key entirely. Code shaped as `res.documents.length` throws on the majority
+ * case; `getSubscriberDocuments` normalises it to an array.
+ */
+export interface SubscriberDocumentsResponse {
+  documents?: SubscriberDocument[] | SubscriberDocument;
+  status?: string;
+  [k: string]: any;
+}
+
+/**
+ * Decode {@link SubscriberDocument.content} into the file's bytes.
+ *
+ * Validates the `%PDF-` magic number only when the document announces itself as a PDF — every row
+ * observed so far did, but the upload form accepts other formats and rejecting them here would be
+ * wrong. Everything else is decoded without a format assertion.
+ */
+export function subscriberDocumentBytes(doc: SubscriberDocument): Uint8Array {
+  const b64 = doc?.content;
+  if (typeof b64 !== 'string' || b64 === '') {
+    throw new Error(
+      `Subscriber document ${JSON.stringify(doc?.name ?? doc?.id ?? '(unnamed)')} has no content`,
+    );
+  }
+  const isPdf = String(doc.contentType ?? '').trim().toUpperCase() === 'PDF';
+  return isPdf
+    ? decodePdfBase64(b64, `Subscriber document ${JSON.stringify(doc.name ?? '(unnamed)')}`)
+    : decodeBase64(b64, `Subscriber document ${JSON.stringify(doc.name ?? '(unnamed)')}`);
 }
 
 /** A rendered invoice PDF, as returned by `contentType=pdf`. */

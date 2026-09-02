@@ -64,7 +64,15 @@ export {
 } from './writeClient.js';
 
 // Domain types, plus the pure accessors over them.
-export { invoicePdfBytes, isQuoteOrder, orderStateOf, quotePdfBytes } from './model.js';
+export {
+  invoicePdfBytes,
+  isQuoteOrder,
+  orderStateOf,
+  quotePdfBytes,
+  subscriberDocumentBytes,
+  taxExemptionCodesOf,
+  taxJurisdictionsOf,
+} from './model.js';
 export type {
   Invoice,
   InvoiceDetail,
@@ -79,12 +87,17 @@ export type {
   QuoteDocumentResponse,
   Rec,
   Subscriber,
+  SubscriberAddress,
+  SubscriberDocument,
+  SubscriberDocumentsResponse,
   SubscriberSearchOptions,
   SubscriberSearchPage,
   Subscription,
   SubscriptionCharge,
   SubscriptionOffer,
   SubscriptionsResponse,
+  TaxExemptionCode,
+  TaxExemptionCodes,
 } from './model.js';
 
 // The link codec.
@@ -170,6 +183,8 @@ export {
   flattenInvoice,
   invoiceCallKey,
   reconcileInvoice,
+  taxTotalsByDescription,
+  taxTotalsByJurisdiction,
   type DuplicateCallMatch,
   type DuplicateCallReport,
   type FlatInvoice,
@@ -177,5 +192,6 @@ export {
   type InvoiceChargeLine,
   type InvoiceReconciliation,
   type InvoiceSurcharge,
+  type InvoiceTaxLine,
   type RepeatedCallGroup,
 } from './invoice.js';
