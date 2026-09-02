@@ -1,6 +1,12 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import { OneBillReadClient, SUBSCRIBER_STATUSES } from './readClient.js';
-import { TEST_CONFIG, fakeSubscribers, mockFetch } from './testkit.js';
+import { OneBillApiError } from './http.js';
+import { invoicePdfBytes } from './model.js';
+import {
+  OneBillInvoiceNotFoundError,
+  OneBillReadClient,
+  SUBSCRIBER_STATUSES,
+} from './readClient.js';
+import { FAKE_PDF_BASE64, TEST_CONFIG, fakeSubscribers, mockFetch } from './testkit.js';
 
 const B = TEST_CONFIG.baseUrl;
 
@@ -281,5 +287,227 @@ describe('path segment guard', () => {
     await expect(client(mock).getSubscriber(acct)).rejects.toThrow(/different endpoint/);
     await expect(client(mock).getSubscriptions(acct)).rejects.toThrow(/different endpoint/);
     expect(mock.apiCalls).toHaveLength(0);
+  });
+});
+
+describe('searchInvoices', () => {
+  it('passes the filters through and always asks for a count', async () => {
+    const mock = mockFetch({ responses: [{ body: { invoice: [] } }] });
+    await client(mock).searchInvoices({
+      accountNumber: 'CLI00000',
+      startCount: 50,
+      resultCount: 25,
+    });
+
+    const q = new URL(mock.apiCalls[0]!.url).searchParams;
+    expect(q.get('accountNumber')).toBe('CLI00000');
+    expect(q.get('startCount')).toBe('50');
+    expect(q.get('resultCount')).toBe('25');
+    expect(q.get('countRequired')).toBe('true');
+  });
+
+  it('omits accountNumber entirely when not given, so the search covers the tenant', async () => {
+    const mock = mockFetch({ responses: [{ body: { invoice: [] } }] });
+    await client(mock).searchInvoices();
+    expect(new URL(mock.apiCalls[0]!.url).searchParams.has('accountNumber')).toBe(false);
+  });
+});
+
+describe('listAllInvoices', () => {
+  /** Serve `total` rows in pages, reporting `resultSize` and NEVER `totalCount` — as this
+   *  endpoint actually behaves. */
+  function pagedInvoices(total: number) {
+    return mockFetch({
+      handler: (call) => {
+        const q = new URL(call.url).searchParams;
+        const start = Number(q.get('startCount') ?? 0);
+        const size = Number(q.get('resultCount') ?? 50);
+        const rows = Array.from({ length: Math.max(0, Math.min(size, total - start)) }, (_, i) => ({
+          invoiceNumber: `INV${String(start + i).padStart(5, '0')}`,
+          accountNumber: 'CLI00000',
+        }));
+        return { body: { invoice: rows, resultSize: rows.length, status: 'OK' } };
+      },
+    });
+  }
+
+  it('walks past page one even though the endpoint reports no totalCount', async () => {
+    // The regression this guards: a `!totalCount -> stop` rule returns 50 of 62 and looks fine.
+    const mock = pagedInvoices(62);
+    const rows = await client(mock).listAllInvoices({ accountNumber: 'CLI00000' });
+
+    expect(rows).toHaveLength(62);
+    expect(rows[0]!.invoiceNumber).toBe('INV00000');
+    expect(rows[61]!.invoiceNumber).toBe('INV00061');
+    expect(mock.apiCalls).toHaveLength(2);
+  });
+
+  it('advances the offset by rows received', async () => {
+    const mock = pagedInvoices(62);
+    await client(mock).listAllInvoices({ accountNumber: 'CLI00000' });
+    expect(new URL(mock.apiCalls[0]!.url).searchParams.get('startCount')).toBe('0');
+    expect(new URL(mock.apiCalls[1]!.url).searchParams.get('startCount')).toBe('50');
+  });
+
+  it('stops on an exactly-full final page without returning duplicates', async () => {
+    const mock = pagedInvoices(50);
+    const rows = await client(mock).listAllInvoices({ accountNumber: 'CLI00000' });
+    expect(rows).toHaveLength(50);
+    expect(new Set(rows.map((r) => r.invoiceNumber)).size).toBe(50);
+  });
+
+  it('throws rather than truncating when maxPages is reached', async () => {
+    const mock = pagedInvoices(500);
+    await expect(
+      client(mock).listAllInvoices({ accountNumber: 'CLI00000', maxPages: 2 }),
+    ).rejects.toThrow(/listAllInvoices stopped after 2 pages/);
+  });
+});
+
+describe('getInvoiceDetail', () => {
+  it('asks for the json representation explicitly', async () => {
+    const mock = mockFetch({ responses: [{ body: { invoice: { invoiceNumber: 'INV00000' } } }] });
+    await client(mock).getInvoiceDetail('INV00000');
+
+    const url = new URL(mock.apiCalls[0]!.url);
+    expect(url.pathname).toBe('/rest/InvoiceService/v1/invoices/INV00000');
+    // Omitting contentType would silently get a PDF back; lowercase is the only accepted spelling.
+    expect(url.searchParams.get('contentType')).toBe('json');
+  });
+
+  it('returns the invoice record', async () => {
+    const mock = mockFetch({
+      responses: [{ body: { invoice: { invoiceNumber: 'INV00000', totalCurrentCharge: 100 } } }],
+    });
+    await expect(client(mock).getInvoiceDetail('INV00000')).resolves.toMatchObject({
+      invoiceNumber: 'INV00000',
+      totalCurrentCharge: 100,
+    });
+  });
+
+  it('encodes an invoice number with awkward characters', async () => {
+    const mock = mockFetch({ responses: [{ body: { invoice: {} } }] });
+    await client(mock).getInvoiceDetail('a b/c');
+    expect(new URL(mock.apiCalls[0]!.url).pathname).toBe(
+      '/rest/InvoiceService/v1/invoices/a%20b%2Fc',
+    );
+  });
+
+  it('rejects an invoice number that would resolve to another endpoint', async () => {
+    const mock = mockFetch({ responses: [{ body: { invoice: {} } }] });
+    await expect(client(mock).getInvoiceDetail('..')).rejects.toThrow(/different endpoint/);
+    expect(mock.apiCalls).toHaveLength(0);
+  });
+
+  it('raises OneBillInvoiceNotFoundError for an unknown invoice reported in-band', async () => {
+    const mock = mockFetch({
+      responses: [
+        {
+          status: 200,
+          body: {
+            savedInCloud: false,
+            status: 'Bad Request',
+            validationResponse: {
+              successful: false,
+              validationErrorInfo: [
+                { code: '10INWS0022', message: 'Failed to get invoice.', errorLevel: 0 },
+              ],
+            },
+          },
+        },
+      ],
+    });
+    await expect(client(mock).getInvoiceDetail('INV99999')).rejects.toThrow(
+      OneBillInvoiceNotFoundError,
+    );
+  });
+
+  it('leaves a genuine transport failure as an OneBillApiError', async () => {
+    // Same error code, but a real HTTP failure. Retrying that is reasonable; retrying a missing
+    // invoice is not, so the two must not collapse into one class.
+    const mock = mockFetch({
+      responses: [
+        {
+          status: 503,
+          body: {
+            status: 'Bad Request',
+            validationResponse: {
+              validationErrorInfo: [{ code: '10INWS0022', message: 'Failed to get invoice.' }],
+            },
+          },
+        },
+      ],
+    });
+    const err = await client(mock).getInvoiceDetail('INV00000').catch((e) => e);
+    expect(err).toBeInstanceOf(OneBillApiError);
+    expect(err).not.toBeInstanceOf(OneBillInvoiceNotFoundError);
+  });
+
+  it('throws rather than returning an empty invoice when the payload is missing', async () => {
+    const mock = mockFetch({ responses: [{ body: { status: 'OK', savedInCloud: false } }] });
+    await expect(client(mock).getInvoiceDetail('INV00000')).rejects.toThrow(/No invoice payload/);
+  });
+});
+
+describe('getInvoiceXml', () => {
+  it('joins the chunks rather than taking the first', async () => {
+    const mock = mockFetch({
+      responses: [{ body: { invoiceXml: ['<invoice>', '<a/>', '</invoice>'], status: 'OK' } }],
+    });
+    await expect(client(mock).getInvoiceXml('INV00000')).resolves.toBe('<invoice><a/></invoice>');
+    expect(new URL(mock.apiCalls[0]!.url).searchParams.get('contentType')).toBe('xml');
+  });
+
+  it('accepts the bare-string form as well as the array', async () => {
+    const mock = mockFetch({ responses: [{ body: { invoiceXml: '<invoice/>', status: 'OK' } }] });
+    await expect(client(mock).getInvoiceXml('INV00000')).resolves.toBe('<invoice/>');
+  });
+
+  it('throws on an empty payload instead of returning an empty document', async () => {
+    const mock = mockFetch({ responses: [{ body: { invoiceXml: [], status: 'OK' } }] });
+    await expect(client(mock).getInvoiceXml('INV00000')).rejects.toThrow(/No invoice XML payload/);
+  });
+});
+
+describe('getInvoicePdf', () => {
+  it('asks for pdf, joins the chunks, and exposes the filename', async () => {
+    const half = Math.floor(FAKE_PDF_BASE64.length / 2);
+    const mock = mockFetch({
+      responses: [
+        {
+          body: {
+            invoicePdf: [FAKE_PDF_BASE64.slice(0, half), FAKE_PDF_BASE64.slice(half)],
+            invoiceFileName: 'INV00000',
+            status: 'OK',
+          },
+        },
+      ],
+    });
+
+    const pdf = await client(mock).getInvoicePdf('INV00000');
+    expect(new URL(mock.apiCalls[0]!.url).searchParams.get('contentType')).toBe('pdf');
+    expect(pdf.pdfBase64).toBe(FAKE_PDF_BASE64);
+    expect(pdf.fileName).toBe('INV00000');
+  });
+
+  it('decodes to real PDF bytes', async () => {
+    const mock = mockFetch({
+      responses: [{ body: { invoicePdf: [FAKE_PDF_BASE64], status: 'OK' } }],
+    });
+    const bytes = invoicePdfBytes(await client(mock).getInvoicePdf('INV00000'));
+    expect(new TextDecoder().decode(bytes.subarray(0, 5))).toBe('%PDF-');
+  });
+
+  it('refuses a payload that is not a PDF', async () => {
+    const mock = mockFetch({
+      responses: [{ body: { invoicePdf: [btoa('<html>error</html>')], status: 'OK' } }],
+    });
+    const pdf = await client(mock).getInvoicePdf('INV00000');
+    expect(() => invoicePdfBytes(pdf)).toThrow(/not a PDF/);
+  });
+
+  it('throws on an empty payload rather than writing a zero-byte file', async () => {
+    const mock = mockFetch({ responses: [{ body: { invoicePdf: [], status: 'OK' } }] });
+    await expect(client(mock).getInvoicePdf('INV00000')).rejects.toThrow(/No invoice PDF payload/);
   });
 });

@@ -330,6 +330,78 @@ subscriber; pass `linkSource: 'externalId'` for a cheaper pass that trades away 
 Per-account failures are collected into `failures` rather than thrown, so one bad account cannot
 destroy a long sweep — check it before trusting the report.
 
+## Invoices
+
+`listAllInvoices` walks the invoice list; `getInvoiceDetail` reads one invoice in full, down to the
+individual rated calls behind a metered charge.
+
+```ts
+import {
+  OneBillReadClient, flattenInvoice, reconcileInvoice, findDuplicateCalls,
+} from '@dszp/onebill-lib';
+
+const invoices = await client.listAllInvoices({ accountNumber: 'CLI00000' });
+
+const flat = flattenInvoice(await client.getInvoiceDetail(invoices[0].invoiceNumber));
+flat.chargeLines;  // recurring, one-time, and usage rollups
+flat.calls;        // one entry per rated call, with source, destination and rated duration
+```
+
+`accountNumber` is optional — omit it and you get the whole tenant.
+
+### Check the read before you trust it
+
+```ts
+const check = reconcileInvoice(flat);
+if (!check.usageBalanced) throw new Error('lost calls while reading the invoice');
+```
+
+`reconcileInvoice` compares a flattened invoice against the totals the invoice states about itself.
+Run it. The failure mode on this endpoint is a walk that silently drops rows, and an analysis built
+on a partial read reports a reassuring wrong answer.
+
+It returns **two** checks, not one, because they fail for different reasons. `balanced` compares
+charge lines + surcharges + discount against `totalCurrentCharge`. `usageBalanced` compares the
+individual calls against their own rollups — an invoice can balance at the invoice level while the
+per-call walk has lost rows, and only the second check sees that.
+
+### Do not add charge lines and calls together
+
+A usage charge line's `amount` **is** the sum of its own calls. `InvoiceChargeLine.isUsageRollup`
+marks those lines. Adding both double-counts every metered charge.
+
+### Comparing calls across invoices
+
+```ts
+const report = findDuplicateCalls(thisInvoice.calls, everyEarlierInvoice.calls);
+report.naturalOnly.length;  // calls re-ingested under a new eventId
+```
+
+`eventId` is assigned when OneBill **ingests** the CDR, not by the switch — so a call re-imported
+after a broken usage feed carries a *new* id for the same call, and matching on `eventId` alone
+reports "no duplicates" for exactly the case you are asking about. `invoiceCallKey` is the identity
+that survives a re-import: timestamp, source, destination, rated quantity.
+
+`findDuplicateCalls` applies both keys and reports them separately rather than merging them into a
+verdict — `naturalOnly` is the count that matters, and a merged flag could not express it.
+`findRepeatedCalls` answers the different question of whether one invoice repeats a call against
+itself, which a replayed feed can cause with no earlier invoice involved.
+
+### PDFs and XML
+
+```ts
+import { invoicePdfBytes } from '@dszp/onebill-lib';
+
+const pdf = await client.getInvoicePdf('INV00000');
+writeFileSync(`${pdf.fileName}.pdf`, invoicePdfBytes(pdf));  // fileName carries NO extension
+```
+
+`getInvoiceXml` returns the same content as `getInvoiceDetail` in OneBill's own template format.
+Prefer `getInvoiceDetail` — the XML for a large invoice runs to tens of megabytes of text.
+
+**Large invoices are large.** An invoice carrying a year of recovered usage took ~20 seconds to
+return and held over ten thousand calls. Budget for it, particularly in a Worker.
+
 ## Develop
 
 ```

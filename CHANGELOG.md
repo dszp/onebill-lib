@@ -5,6 +5,47 @@ All notable changes to `@dszp/onebill-lib` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Invoice reads** — `searchInvoices`, `listAllInvoices`, `getInvoiceDetail`, `getInvoiceXml`,
+  `getInvoicePdf`, `invoicePdfBytes`, and `OneBillInvoiceNotFoundError`.
+
+  `accountNumber` is optional on the list, which the published spec does not say: omit it and the
+  endpoint covers the whole tenant. The list reports `resultSize` and **never** `totalCount`, so
+  the common `!totalCount → stop` rule returns page one as the whole history — an account with 62
+  invoices answers with 50 and looks complete. `listAllInvoices` uses the short-page rule instead.
+
+  The single-invoice endpoint serves the same content three ways via `contentType`, and that
+  parameter is booby-trapped three ways: it is lowercase-only (`XML` is rejected in-band at HTTP
+  200), **omitting it silently returns a PDF** rather than erroring, and each value populates a
+  different field of the same envelope. The transport-level call is therefore private, and every
+  public reader passes an explicit value. Both document payloads are typed as arrays of chunks and
+  are joined — each has held exactly one element in every response observed, up to 37 MB, which is
+  precisely why reading `[0]` is a bug that never shows up in testing.
+
+- **Invoice detail as records** — `flattenInvoice`, `reconcileInvoice`, `invoiceCallKey`,
+  `findDuplicateCalls`, `findRepeatedCalls`.
+
+  An invoice is a five-level tree in which one field repeats its own name, every level may be an
+  array or a bare object, and three different things are named some variant of "line item". Two
+  traps follow, and both yield a plausible wrong number: a usage charge line's `amount` **is** the
+  sum of its own calls, so adding charge lines to calls double-counts every metered charge; and
+  `taxLineItem.lineItems` reuses the charge-line name, so a name-based match collects tax rows as
+  charges. `flattenInvoice` walks by position; `reconcileInvoice` checks the result against the
+  invoice's own totals and reports **two** checks rather than one, because an invoice can balance
+  at the invoice level while the per-call walk has quietly lost rows.
+
+  `findDuplicateCalls` matches on `eventId` and on `invoiceCallKey` and reports them separately,
+  never merged. `eventId` is assigned at ingest rather than by the switch, so a CDR replayed after
+  a broken usage feed arrives with a new id for the same call — matching on it alone answers "no
+  duplicates" for the one case anyone asks about. The merged verdict could not express that
+  disagreement, which is why `naturalOnly` is its own field.
+
+  Verified against the XML representation call-for-call and cent-for-cent on live invoices up to
+  a five-figure call count.
+
 ## [0.1.0] — 2026-08-07
 
 First release: split read/write OneBill clients, a link codec for the Subscriber `externalId` field,

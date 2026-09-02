@@ -15,6 +15,7 @@ src/
   attributes.ts   Custom-field group <-> link mapping. Pure.
   linkIndex.ts    buildLinkIndex — a pure function over an array of subscribers.
   usage.ts        Usage-subscription reconciliation. Pure — fetches nothing, writes nothing.
+  invoice.ts      Invoice detail: flatten, reconcile, compare calls. Pure.
   gather.ts       The one orchestrator: reads what usage.ts needs. The only I/O outside the clients.
   index.ts        The barrel. Explicit named exports only.
   testkit.ts      Recording mock fetch. Build-excluded, never shipped.
@@ -26,7 +27,7 @@ imports nothing — it is a string codec, and it stays testable without a networ
 ## Logic is pure; exactly one module does the fetching
 
 Every non-trivial decision this library makes lives in a pure function over plain records —
-`link.ts`, `attributes.ts`, `linkIndex.ts`, `usage.ts`. The clients do I/O and no thinking. That is
+`link.ts`, `attributes.ts`, `linkIndex.ts`, `usage.ts`, `invoice.ts`. The clients do I/O and no thinking. That is
 not tidiness for its own sake: it is what lets the hard parts be tested exhaustively against
 fixtures with no network, no mock server and no credentials, which is why `pnpm test` is green on a
 fresh clone.
@@ -96,6 +97,80 @@ behaviour.
 (Also observed: `ProductService/v1/products` returned 26 rows for `resultCount=5`, so `resultCount`
 is not honoured everywhere either. The short-page rule tolerates that; a rule based on requested page
 size alone would not.)
+
+## The invoice document, and the three things called "line item"
+
+`getInvoiceDetail` returns a five-level tree in which one field repeats its own name and three
+different things are named some variant of "line item":
+
+```
+invoice
+  accountInvoiceElements[]          one per billed account (a parent carries its children)
+    accountInvoiceElements[]        the same name again, nested inside itself
+      invoiceElements[]             one per subscription
+        lineItems[]                 A CHARGE LINE — recurring, one-time, or a usage ROLLUP
+          usageLineItem[]           one per event name: "Origination Calls", "Termination Calls"
+            lstLineItems[]          ONE RATED CALL
+          taxLineItem.lineItems[]   a tax component. NOT a charge. Same tag name.
+```
+
+Every level is "an array, unless there is one of it, in which case it is the object".
+
+Two traps follow, and both produce a wrong number that looks entirely plausible:
+
+- **A usage charge line's `amount` is the sum of its own calls.** Add charge lines and calls
+  together and every metered charge is counted twice.
+- **`taxLineItem.lineItems` reuses the charge-line name**, so anything matching on the name rather
+  than the position collects tax rows as charges.
+
+`flattenInvoice` walks it by position and returns flat charge lines, surcharges and calls.
+`reconcileInvoice` then checks that result against the totals the invoice states about itself, and
+that is the point of the module: **a walk that silently drops rows is the failure mode here**, and
+an analysis built on a partial extraction reports reassuring nonsense. It returns two checks rather
+than one boolean, because they fail for different reasons — `balanced` compares charge lines +
+surcharges + discount against `totalCurrentCharge`, while `usageBalanced` compares the individual
+calls against their own rollups. An invoice can balance at the invoice level while the per-call
+walk has lost rows, and only the second check sees it.
+
+### Read the JSON, not the XML
+
+The single-invoice endpoint serves the same content three ways, selected by `contentType`, and the
+parameter is booby-trapped three ways (established live 2026-09-02):
+
+- It is **case-sensitive and lowercase-only**: `xml` works, `XML` is rejected in-band at HTTP 200.
+- **Omitting it does not error.** The server defaults to `pdf`, so a caller who forgets the
+  parameter gets a base64 document where they expected records.
+- Each value populates a different field, and the two document forms are **arrays of chunks**.
+
+So `#getInvoiceDocument` is private and each public reader passes an explicit value.
+
+`json` and `xml` carry identical detail — verified call-for-call and cent-for-cent on invoices up
+to a five-figure call count. The library reads `json` because the XML for that invoice is 37 MB of text, and
+parsing it dependency-free would mean shipping a hand-rolled XML parser to save nothing. `getInvoiceXml`
+exists anyway, because the XML is what OneBill's own invoice template renders from and is therefore
+the reference when a rendered invoice and the API disagree.
+
+Both document payloads are typed as arrays and have held exactly one element in every response
+observed, up to 37 MB — which is exactly why reading `[0]` is a bug that would never surface in
+testing. Both are joined.
+
+## Comparing calls across invoices
+
+`eventId` is assigned when OneBill **ingests** a CDR, not by the switch. A call re-imported after a
+broken usage feed therefore arrives with a *new* `eventId` for the same call — so matching on it
+alone answers "no duplicates" for the one situation anyone asks the question about. `invoiceCallKey`
+is the identity that survives a re-import: timestamp, source, destination, rated quantity.
+
+`findDuplicateCalls` applies both keys and reports them **separately, never merged**. A single
+"is it a duplicate" flag could not express disagreement between the keys, and disagreement is the
+interesting case: a natural-key hit whose `eventId` missed is a re-ingested event, which is the
+double-billing shape, while an `eventId` hit is one stored event appearing twice. `naturalOnly`
+counts exactly that difference.
+
+`findRepeatedCalls` asks the separate question of whether one invoice repeats a call against
+itself, which a replayed feed can cause with no earlier invoice involved. Genuine repeats exist —
+a call rated as two legs — so it returns the rows and whether their `eventId`s differ, rather than
+a verdict.
 
 ## The status filter, and the second silent omission
 

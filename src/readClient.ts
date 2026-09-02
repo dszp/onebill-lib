@@ -1,5 +1,11 @@
 import { OneBillApiError, OneBillHttp, type OneBillHttpConfig } from './http.js';
 import type {
+  Invoice,
+  InvoiceDetail,
+  InvoiceDocumentResponse,
+  InvoicePdf,
+  InvoiceSearchOptions,
+  InvoiceSearchPage,
   Order,
   OrderSearchOptions,
   OrderSearchPage,
@@ -464,6 +470,203 @@ export class OneBillReadClient {
       throw err;
     }
   }
+
+  /**
+   * One page of invoices.
+   *
+   * `accountNumber` is **optional**, which the published spec does not say — omit it and the
+   * endpoint lists invoices across the whole tenant (verified live 2026-09-02). Rows come back
+   * newest first.
+   *
+   * This is the summary shape only. Charge lines and the individual rated calls behind a metered
+   * charge exist solely on {@link OneBillReadClient.getInvoiceDetail}.
+   */
+  async searchInvoices(opts: InvoiceSearchOptions = {}): Promise<InvoiceSearchPage> {
+    return this.#http.request<InvoiceSearchPage>('GET', '/rest/InvoiceService/v1/invoices', {
+      query: {
+        accountNumber: opts.accountNumber,
+        startCount: opts.startCount,
+        resultCount: opts.resultCount,
+        countRequired: true,
+      },
+    });
+  }
+
+  /**
+   * Every invoice, following pagination to the end.
+   *
+   * **This endpoint reports `resultSize` and never `totalCount`** — verified live 2026-07-31 and
+   * again 2026-09-02 — so the widespread "stop when `totalCount` is missing" rule returns page one
+   * as the whole history here, silently. An account with 62 invoices answers with 50 and looks
+   * complete. The shared walk stops on a short page instead, which is correct either way; see
+   * {@link OneBillReadClient.listAllSubscribers} for the full reasoning.
+   *
+   * Throws rather than truncating if `maxPages` is reached.
+   */
+  async listAllInvoices(
+    opts: {
+      /** Restrict to one account. Omit for the whole tenant. */
+      accountNumber?: string;
+      pageSize?: number;
+      maxPages?: number;
+    } = {},
+  ): Promise<Invoice[]> {
+    return this.#pageThrough(
+      opts,
+      (startCount, resultCount) =>
+        this.searchInvoices({ accountNumber: opts.accountNumber, startCount, resultCount }),
+      (res) => res.invoice ?? [],
+      'listAllInvoices',
+      opts.accountNumber === undefined ? '' : ` for account ${opts.accountNumber}`,
+    );
+  }
+
+  /**
+   * The single-invoice endpoint, in one of its three representations.
+   *
+   * **`contentType` is the whole story on this endpoint, and it is booby-trapped three ways**
+   * (established live 2026-09-02):
+   *
+   * - It is **case-sensitive and lowercase-only**. `xml` works; `XML` is rejected as
+   *   `Bad Request` — in-band, at HTTP 200.
+   * - **Omitting it does not error and does not give you JSON.** The server defaults to `pdf`, so
+   *   a caller who forgets the parameter gets a base64 document where they expected records.
+   * - Each value populates a *different field* of the same envelope, and the two document
+   *   representations are **arrays of chunks** rather than strings.
+   *
+   * So this is private and every public reader passes an explicit, known-good value.
+   */
+  async #getInvoiceDocument(
+    invoiceNumber: string,
+    contentType: 'json' | 'xml' | 'pdf',
+  ): Promise<InvoiceDocumentResponse> {
+    const path = `/rest/InvoiceService/v1/invoices/${assertPathSegment(invoiceNumber, 'invoice number')}`;
+    try {
+      return await this.#http.request<InvoiceDocumentResponse>('GET', path, {
+        query: { contentType },
+      });
+    } catch (err) {
+      if (isMissingInvoice(err)) throw new OneBillInvoiceNotFoundError(invoiceNumber, err);
+      throw err;
+    }
+  }
+
+  /**
+   * One invoice in full, as records: charge lines, and the individual rated calls behind every
+   * metered charge.
+   *
+   * **This is the same detail as the XML representation**, verified against it call-for-call and
+   * cent-for-cent on invoices up to a five-figure call count (2026-09-02). Prefer it: the XML for that invoice
+   * is 37 MB of text that no dependency-free parser in this library could responsibly handle,
+   * while this arrives as a structure the runtime has already parsed.
+   *
+   * The rated detail is buried four levels deep under a field that repeats its own name, so pass
+   * the result to `flattenInvoice` rather than walking it by hand, and check the result with
+   * `reconcileInvoice` before drawing conclusions from individual calls.
+   *
+   * **Large invoices are large.** A catch-up invoice carrying a year of recovered usage took ~20
+   * seconds to return and holds tens of thousands of records. Budget for it, especially in a
+   * Worker.
+   *
+   * Throws {@link OneBillInvoiceNotFoundError} if the invoice number is unknown.
+   */
+  async getInvoiceDetail(invoiceNumber: string): Promise<InvoiceDetail> {
+    const res = await this.#getInvoiceDocument(invoiceNumber, 'json');
+    const detail = res.invoice;
+    if (detail === undefined || detail === null) {
+      throw new Error(
+        `No invoice payload for ${invoiceNumber}` +
+          `${res.status ? ` (OneBill reported status ${JSON.stringify(res.status)})` : ''}`,
+      );
+    }
+    return detail;
+  }
+
+  /**
+   * One invoice as XML.
+   *
+   * Rarely what you want — {@link OneBillReadClient.getInvoiceDetail} carries the same content as
+   * records. Kept because the XML is what OneBill's own invoice template renders from, so it is
+   * the reference when a rendered invoice and the API disagree.
+   *
+   * The chunks are joined here. OneBill types this field as an array and every response observed
+   * so far has held exactly one element, up to 37 MB — which is precisely why reading `[0]` is a
+   * bug that would never show up in testing.
+   */
+  async getInvoiceXml(invoiceNumber: string): Promise<string> {
+    const res = await this.#getInvoiceDocument(invoiceNumber, 'xml');
+    const xml = joinChunks(res.invoiceXml);
+    if (xml === undefined) {
+      throw new Error(
+        `No invoice XML payload for ${invoiceNumber}` +
+          `${res.status ? ` (OneBill reported status ${JSON.stringify(res.status)})` : ''}`,
+      );
+    }
+    return xml;
+  }
+
+  /**
+   * The rendered invoice PDF — the document the customer received.
+   *
+   * As with the XML, the payload is an array of base64 chunks and is joined here. Decode with
+   * `invoicePdfBytes`.
+   *
+   * Note {@link InvoicePdf.fileName} is OneBill's own name for the document and carries **no
+   * extension** (`INV00000`, not `INV00000.pdf`) — add one before writing it to disk.
+   */
+  async getInvoicePdf(invoiceNumber: string): Promise<InvoicePdf> {
+    const res = await this.#getInvoiceDocument(invoiceNumber, 'pdf');
+    const pdfBase64 = joinChunks(res.invoicePdf);
+    if (pdfBase64 === undefined) {
+      throw new Error(
+        `No invoice PDF payload for ${invoiceNumber}` +
+          `${res.status ? ` (OneBill reported status ${JSON.stringify(res.status)})` : ''}`,
+      );
+    }
+    return { pdfBase64, fileName: res.invoiceFileName, raw: res };
+  }
+}
+
+/**
+ * Join a payload OneBill types as an array of chunks, tolerating the bare-string form.
+ *
+ * `undefined` when there is nothing at all, so callers can tell "empty payload" from "one empty
+ * chunk" — an in-band failure produces the former and must not be written to disk as a file.
+ */
+function joinChunks(value: string[] | string | undefined): string | undefined {
+  if (typeof value === 'string') return value === '' ? undefined : value;
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const joined = value.filter((c): c is string => typeof c === 'string').join('');
+  return joined === '' ? undefined : joined;
+}
+
+/** Raised when the invoice number does not exist. */
+export class OneBillInvoiceNotFoundError extends Error {
+  constructor(
+    public readonly invoiceNumber: string,
+    /** The underlying `OneBillApiError`. */
+    public readonly cause: unknown,
+  ) {
+    super(`No invoice ${invoiceNumber}`);
+    this.name = 'OneBillInvoiceNotFoundError';
+  }
+}
+
+/**
+ * Is this error OneBill's "no such invoice"?
+ *
+ * **Gated on HTTP 200**, like the quote-document check: the miss is reported in-band, as a body
+ * carrying `errorCode 10INWS0022` with `status: "Bad Request"`. A genuine transport failure that
+ * happened to carry similar text must stay an `OneBillApiError`, because retrying it is
+ * reasonable and retrying a missing invoice is not.
+ */
+function isMissingInvoice(err: unknown): boolean {
+  if (!(err instanceof OneBillApiError) || err.status !== 200) return false;
+  const body = err.body as
+    | { validationResponse?: { validationErrorInfo?: { code?: unknown }[] } }
+    | undefined;
+  const info = body?.validationResponse?.validationErrorInfo;
+  return Array.isArray(info) && info.some((e) => e?.code === '10INWS0022');
 }
 
 /**

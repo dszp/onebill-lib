@@ -301,23 +301,43 @@ export interface QuoteDocumentResponse {
  * that no reader can open.
  */
 export function quotePdfBytes(doc: QuoteDocument): Uint8Array {
-  const b64 = doc.pdfBase64;
+  return decodePdfBase64(doc.pdfBase64, 'Quote document');
+}
+
+/**
+ * Decode {@link InvoicePdf.pdfBase64} into the PDF's bytes.
+ *
+ * Same contract and same guarantees as {@link quotePdfBytes} — see it for why this validates
+ * rather than trusting the payload.
+ */
+export function invoicePdfBytes(doc: InvoicePdf): Uint8Array {
+  return decodePdfBase64(doc.pdfBase64, 'Invoice document');
+}
+
+/**
+ * The shared decode behind {@link quotePdfBytes} and {@link invoicePdfBytes}.
+ *
+ * One implementation on purpose: both endpoints answer HTTP 200 when something has gone wrong, so
+ * the validation is the whole value of these functions, and two copies of it would eventually be
+ * two different amounts of validation.
+ */
+function decodePdfBase64(b64: unknown, what: string): Uint8Array {
   if (typeof b64 !== 'string' || b64 === '') {
-    throw new Error('Quote document has no PDF payload');
+    throw new Error(`${what} has no PDF payload`);
   }
 
   let binary: string;
   try {
     binary = atob(b64);
   } catch {
-    throw new Error('Quote document payload is not valid base64');
+    throw new Error(`${what} payload is not valid base64`);
   }
 
   // Check the magic number BEFORE allocating, so a garbage payload — an HTML error page, say —
-  // costs nothing. `%PDF-` was present on every document this endpoint returned.
+  // costs nothing. `%PDF-` was present on every document these endpoints returned.
   if (binary.slice(0, 5) !== '%PDF-') {
     throw new Error(
-      `Quote document payload is not a PDF (starts with ${JSON.stringify(binary.slice(0, 8))})`,
+      `${what} payload is not a PDF (starts with ${JSON.stringify(binary.slice(0, 8))})`,
     );
   }
 
@@ -379,4 +399,138 @@ const QUOTE_STATES = new Set([1002, 1007, 1034]);
 export function isQuoteOrder(order: Order): boolean {
   const state = orderStateOf(order);
   return state !== undefined && QUOTE_STATES.has(state);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Invoices
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A row from the invoice list endpoint.
+ *
+ * This is the thin summary shape. The rated detail — charge lines, and the individual usage events
+ * behind a metered charge — lives only on the single-invoice read; see
+ * `OneBillReadClient.getInvoiceDetail`.
+ */
+export interface Invoice {
+  /** e.g. `INV00000`. The identifier the single-invoice endpoints take. */
+  invoiceNumber: string;
+  accountNumber?: string;
+  /** ISO-8601 with offset, e.g. `2026-02-02T00:00:00-07:00`. */
+  invoiceDate?: string;
+  dueDate?: string;
+  /** Invoice total including tax. */
+  amount?: number;
+  /** Outstanding balance. `0` once paid. */
+  dueAmount?: number;
+  /** `Due`, `Paid`, … */
+  status?: string;
+  currency?: string;
+  billNumber?: string;
+  invoiceGenerationPreference?: number;
+  [k: string]: any;
+}
+
+/** One page of an invoice search. */
+export interface InvoiceSearchPage {
+  /** The rows in this page. Absent rather than empty when nothing matched. */
+  invoice?: Invoice[];
+  /** The number of rows in THIS page — not the total matching the query. */
+  resultSize?: number;
+  /**
+   * **This endpoint does not report it.** Declared only so code shared with the subscriber and
+   * order searches type-checks; verified absent live 2026-07-31 and again 2026-09-02.
+   *
+   * Pagination that stops when `totalCount` is missing therefore returns page one as the whole
+   * result set here. See `listAllInvoices` for the rule that works either way.
+   */
+  totalCount?: number;
+  /** Sum of `dueAmount` across the matched rows. */
+  totalDueAmount?: number;
+  status?: string;
+  [k: string]: any;
+}
+
+/** Options accepted by the invoice search endpoint. */
+export interface InvoiceSearchOptions {
+  /**
+   * Restrict to one account. **Optional** — omitting it lists invoices across the whole tenant,
+   * which the published spec does not say (it documents `accountNumber` without marking it
+   * optional). Verified live 2026-09-02: an unfiltered page returned rows for three distinct
+   * accounts.
+   */
+  accountNumber?: string;
+  /** Row offset, not page index. Honoured here — verified live. */
+  startCount?: number;
+  /** Rows per page, capped at 50 by the server. */
+  resultCount?: number;
+}
+
+/**
+ * The envelope the single-invoice endpoint returns. Which field is populated depends on the
+ * `contentType` requested — see `OneBillReadClient.getInvoiceDetail` for the trap in that
+ * parameter.
+ */
+export interface InvoiceDocumentResponse {
+  /** `contentType=json`: the structured invoice. */
+  invoice?: InvoiceDetail;
+  /**
+   * `contentType=xml`: the invoice as XML. **An array of chunks that must be joined** — every
+   * sample so far has had exactly one element, so code that reads `invoiceXml[0]` looks correct
+   * and would silently truncate the day it is not.
+   */
+  invoiceXml?: string[] | string;
+  /** `contentType=pdf` (and the server's default when `contentType` is omitted): base64 PDF. */
+  invoicePdf?: string;
+  invoiceFileName?: string;
+  savedInCloud?: boolean;
+  /** `OK`, or `Bad Request` when the in-band validation failed. */
+  status?: string;
+  /** Present instead of a payload when the request was rejected in-band at HTTP 200. */
+  validationResponse?: Rec;
+  [k: string]: any;
+}
+
+/**
+ * The structured invoice returned by `contentType=json`.
+ *
+ * **Deliberately thin.** The rated detail is buried four levels deep under a field that repeats its
+ * own name (`accountInvoiceElements.accountInvoiceElements`), and every level is an array. Reach it
+ * with `flattenInvoice` rather than walking this by hand — that walk is the part callers get wrong.
+ */
+export interface InvoiceDetail {
+  invoiceNumber?: string;
+  accountNumber?: string;
+  /** `MM/dd/yyyy`. Note this is NOT the ISO shape the list endpoint returns. */
+  invoiceDate?: string;
+  invoiceDuedate?: string;
+  /** Start of the billing period this invoice covers, `MM/dd/yyyy`. */
+  cycleStart?: string;
+  /** End of the billing period, `MM/dd/yyyy`. */
+  cycleEnd?: string;
+  /**
+   * Charges before tax: charge lines + account-level surcharges + `totalDiscount`.
+   * `reconcileInvoice` checks a flattened invoice against exactly this.
+   */
+  totalCurrentCharge?: number;
+  /** Negative when a discount applies. Already reflected in `totalCurrentCharge`. */
+  totalDiscount?: number;
+  totalSurcharge?: number;
+  currency?: string;
+  currencyCode?: string;
+  /** One entry per billed account — a parent invoice carries its children here too. */
+  accountInvoiceElements?: Rec[];
+  enhancedAccountSummary?: Rec;
+  accountSummary?: Rec;
+  [k: string]: any;
+}
+
+/** A rendered invoice PDF, as returned by `contentType=pdf`. */
+export interface InvoicePdf {
+  /** Base64-encoded PDF. */
+  pdfBase64: string;
+  /** OneBill's own filename for the document. */
+  fileName?: string;
+  /** The raw envelope, for anything this interface does not model. */
+  raw?: Rec;
 }

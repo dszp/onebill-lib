@@ -47,6 +47,7 @@ export {
   ALL_ORDER_STATE_FILTERS,
   DEFAULT_LIST_STATUSES,
   ORDER_STATE_FILTERS,
+  OneBillInvoiceNotFoundError,
   OneBillNoQuoteDocumentError,
   OneBillReadClient,
   SUBSCRIBER_STATUSES,
@@ -63,8 +64,14 @@ export {
 } from './writeClient.js';
 
 // Domain types, plus the pure accessors over them.
-export { isQuoteOrder, orderStateOf, quotePdfBytes } from './model.js';
+export { invoicePdfBytes, isQuoteOrder, orderStateOf, quotePdfBytes } from './model.js';
 export type {
+  Invoice,
+  InvoiceDetail,
+  InvoiceDocumentResponse,
+  InvoicePdf,
+  InvoiceSearchOptions,
+  InvoiceSearchPage,
   Order,
   OrderSearchOptions,
   OrderSearchPage,
@@ -155,3 +162,20 @@ export {
   type GatherUsageRowsOptions,
   type UsageReadSource,
 } from './gather.js';
+
+// Invoice detail. Pure functions over a record from `getInvoiceDetail` - fetches nothing.
+export {
+  findDuplicateCalls,
+  findRepeatedCalls,
+  flattenInvoice,
+  invoiceCallKey,
+  reconcileInvoice,
+  type DuplicateCallMatch,
+  type DuplicateCallReport,
+  type FlatInvoice,
+  type InvoiceCall,
+  type InvoiceChargeLine,
+  type InvoiceReconciliation,
+  type InvoiceSurcharge,
+  type RepeatedCallGroup,
+} from './invoice.js';
