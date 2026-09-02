@@ -526,7 +526,7 @@ describe('getSubscriberDocuments', () => {
   });
 
   it('returns [] when the account has none — the key is ABSENT, not an empty array', async () => {
-    // roughly half the accounts on a live tenant omitted `documents` entirely, so `res.documents.length`
+    // Roughly half the accounts on a live tenant omitted `documents` entirely, so
     // throws on the majority case.
     const mock = mockFetch({ responses: [{ body: { status: 'OK', isAgent: false } }] });
     await expect(client(mock).getSubscriberDocuments('CLI00000')).resolves.toEqual([]);
