@@ -5,6 +5,34 @@ All notable changes to `@dszp/onebill-lib` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] — 2026-09-02
+
+### Fixed
+
+- **`payInfo` is no longer echoed back on the subscriber write.** A stored card is read out
+  **masked** — `cardNumber: "**** **** **** 0000"` — and the read-modify-write PUT sent that mask
+  straight back, whereupon OneBill validated it as a real card number and rejected the entire write
+  in-band at HTTP 200:
+
+      10CM1014  Invalid credit card number.
+      10CM1066  Invalid Card Type associated for entered credit card.
+      10CM1046  Card CVV Number is mandatory.
+
+  Nothing about the write concerns payment, and the account is left untouched — but **every account
+  with a payment method on file was unwritable**, which on a normal tenant is most of them. Only
+  accounts with no stored card ever succeeded, which is why this survived the first release of the
+  write path.
+
+  Omitting the field is safe *here* and that is not the general rule: a partial PUT to this endpoint
+  is destructive, so dropping a field is normally how you lose it. Verified live on a disposable
+  account before shipping — with `payInfo` omitted the write succeeds and the payment profile comes
+  back byte-identical, profile id, reference key, masked number, expiry, address and status intact.
+  Checked against both a stored card and an ACH profile. `payInfo` is managed through its own
+  endpoints and does not round-trip through this one.
+
+  Anything else added to that strip list needs the same treatment: prove the field survives its own
+  omission, on an account you can afford to break.
+
 ## [0.3.2] — 2026-09-02
 
 Packaging only; no API change from 0.3.1. 0.3.0 and 0.3.1 are not available on npm — install 0.3.2

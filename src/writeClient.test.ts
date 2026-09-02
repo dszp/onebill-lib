@@ -553,3 +553,58 @@ describe('path segment guard', () => {
     expect(mock.apiCalls[0]!.url).toContain('a%20b%2Fc');
   });
 });
+
+describe('payInfo is stripped from the write body', () => {
+  /** A record carrying a stored card, as the API returns it: the number is MASKED. */
+  function withStoredCard() {
+    return {
+      accountNumber: 'CLI00000',
+      accountStatus: 'Active',
+      externalId: '',
+      payInfo: [
+        {
+          paymentProfileId: '00000',
+          paymentMethod: 'CC',
+          creditCardInfo: { cardNumber: '**** **** **** 0000', cardType: 'VISA' },
+        },
+      ],
+      accountAttribute: [],
+    };
+  }
+
+  const MAPPING = [{ group: 'PBX', ns: 'NS', valueField: 'Domain', qualifierField: 'Site' }];
+
+  it('does not echo payInfo back on the PUT', async () => {
+    // Echoing the mask makes the server validate it as a real card number and reject the whole
+    // write, on an operation that has nothing to do with payment.
+    const mock = mockFetch({
+      handler: (call) =>
+        call.method === 'GET' ? { body: withStoredCard() } : { body: { ...withStoredCard(), status: 'OK' } },
+    });
+    const client = new OneBillWriteClient({ ...TEST_CONFIG, fetchImpl: mock.fetchImpl });
+    await client
+      .setSubscriberLinks('CLI00000', [{ ns: 'NS', value: 'acme.12345.service' }], MAPPING)
+      .catch(() => undefined);
+
+    const put = mock.apiCalls.find((c) => c.method === 'PUT');
+    expect(put).toBeDefined();
+    expect(Object.keys(put!.body)).not.toContain('payInfo');
+  });
+
+  it('still sends the rest of the record, because a partial PUT is destructive here', async () => {
+    const mock = mockFetch({
+      handler: (call) =>
+        call.method === 'GET' ? { body: withStoredCard() } : { body: { ...withStoredCard(), status: 'OK' } },
+    });
+    const client = new OneBillWriteClient({ ...TEST_CONFIG, fetchImpl: mock.fetchImpl });
+    await client
+      .setSubscriberLinks('CLI00000', [{ ns: 'NS', value: 'acme.12345.service' }], MAPPING)
+      .catch(() => undefined);
+
+    const put = mock.apiCalls.find((c) => c.method === 'PUT')!;
+    expect(put.body.accountNumber).toBe('CLI00000');
+    expect(put.body.externalId).toBe('NS:acme.12345.service');
+    // `status` is the envelope's own key and is likewise not settable.
+    expect(Object.keys(put.body)).not.toContain('status');
+  });
+});

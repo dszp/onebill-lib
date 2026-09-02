@@ -64,7 +64,30 @@ function normalize(value: unknown): string {
 }
 
 /** Response-envelope keys that are not settable fields and must not be echoed back on a PUT. */
-const NOT_SETTABLE = new Set(['status']);
+/**
+ * Fields stripped from the read-modify-write PUT body.
+ *
+ * `status` is the response envelope's own key, not a settable field.
+ *
+ * `payInfo` is stripped because **the API will not accept back what it just gave you**. A stored
+ * card is read out masked — `cardNumber: "**** **** **** 0000"` — and echoing that mask makes
+ * OneBill validate it as a real number, failing the whole write in-band at HTTP 200 with
+ * `10CM1014 Invalid credit card number`, `10CM1066 Invalid Card Type`, and
+ * `10CM1046 Card CVV Number is mandatory`. Nothing about the write concerns payment, and the
+ * account is left untouched — but every account with a card on file is unwritable until this is
+ * removed, which on a normal tenant is most of them.
+ *
+ * **Omitting it is safe here, and that is not the general rule.** A partial PUT to this endpoint is
+ * destructive — see ARCHITECTURE.md — so dropping a field is normally how you lose it. `payInfo` was
+ * verified live on a disposable account 2026-09-02: with it omitted, the write succeeds and the
+ * payment profile comes back byte-identical, profile id, reference key, masked number, expiry,
+ * address and status all intact. It is managed through its own endpoints and does not round-trip
+ * through this one.
+ *
+ * Anything added here needs the same treatment: prove the field survives its own omission, on an
+ * account you can afford to break.
+ */
+const NOT_SETTABLE = new Set(['status', 'payInfo']);
 
 /** Does this custom-field child hold any actual value? */
 function childHasValue(child: unknown): boolean {
