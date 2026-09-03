@@ -5,6 +5,31 @@ All notable changes to `@dszp/onebill-lib` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] — 2026-09-02
+
+### Fixed
+
+- **`contact` is no longer echoed back on the subscriber write.** Same shape of problem as
+  `payInfo` in 0.3.3, one level deeper and found by a real backfill rather than by reading.
+
+  The API returns `contact[].userDetail.username` and then **validates it as an email address on
+  the way back in**. A tenant that has changed its username-format default to require an email
+  gets this enforced *retroactively on write*: legacy logins that are still perfectly valid — a
+  bare name, or one suffixed when an account was closed — fail the entire write in-band at HTTP 200
+  with `Username must be a valid email.`, once per offending contact. Nothing about a subscriber
+  write concerns portal logins.
+
+  **Stripping only `userDetail` does not help.** The server validates the stored usernames whenever
+  `contact` appears in the payload at all, whatever it contains — the same accounts failed
+  identically with the login block removed. The whole key has to go.
+
+  Verified live on a disposable account before shipping: with `contact` omitted the write succeeds
+  and every contact comes back intact — names, ids, primary/billing flags, all communication points,
+  and the `userDetail` block with its username. Contacts are managed through their own endpoints.
+
+  Note this failure is invisible on a tenant whose logins all happen to be emails, which is why
+  0.3.3 shipped without it.
+
 ## [0.3.3] — 2026-09-02
 
 ### Fixed

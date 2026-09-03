@@ -1,6 +1,6 @@
 {
   "name": "@dszp/onebill-lib",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Portable, Node-free OneBill toolkit: split read/write API clients and a generic multi-system link codec for the Subscriber externalId field. Runs unchanged in a Cloudflare Worker, Node, or the browser.",
   "type": "module",
   "license": "MIT",

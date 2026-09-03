@@ -84,10 +84,25 @@ function normalize(value: unknown): string {
  * address and status all intact. It is managed through its own endpoints and does not round-trip
  * through this one.
  *
+ * `contact` is stripped for the same reason, one level deeper. The API returns
+ * `contact[].userDetail.username` and then **validates it as an email address on the way back in**,
+ * so a portal login that is not an email — a bare name, or one suffixed when an account was closed
+ * — fails the whole write with `Username must be a valid email.`, once per offending contact.
+ * Nothing about a subscriber write concerns portal logins.
+ *
+ * Dropping only `userDetail` is **not** enough: the server validates the stored usernames whenever
+ * `contact` appears in the payload at all, whatever it contains. Measured — the same accounts failed
+ * identically with `userDetail` removed. The whole key has to go.
+ *
+ * Verified live on a disposable account 2026-09-02: with `contact` omitted the write succeeds and
+ * every contact comes back intact — names, ids, primary/billing flags, all communication points,
+ * and the `userDetail` block with its username. Contacts are managed through their own endpoints.
+ *
  * Anything added here needs the same treatment: prove the field survives its own omission, on an
  * account you can afford to break.
  */
-const NOT_SETTABLE = new Set(['status', 'payInfo']);
+const NOT_SETTABLE = new Set(['status', 'payInfo', 'contact']);
+
 
 /** Does this custom-field child hold any actual value? */
 function childHasValue(child: unknown): boolean {
@@ -308,7 +323,8 @@ export class OneBillWriteClient {
     const body: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(before)) {
       if (NOT_SETTABLE.has(k)) continue;
-      body[k] = k === 'accountAttribute' ? stripEmptyAttributeGroups(v) : v;
+      if (k === 'accountAttribute') body[k] = stripEmptyAttributeGroups(v);
+      else body[k] = v;
     }
 
     if (externalId === '') {

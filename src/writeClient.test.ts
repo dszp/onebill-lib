@@ -608,3 +608,67 @@ describe('payInfo is stripped from the write body', () => {
     expect(Object.keys(put.body)).not.toContain('status');
   });
 });
+
+describe('contact is stripped from the write body', () => {
+  /** A record whose portal login is NOT an email — the shape the API refuses to take back. */
+  function withLegacyLogin() {
+    return {
+      accountNumber: 'CLI00000',
+      accountStatus: 'Active',
+      externalId: '',
+      accountAttribute: [],
+      contact: [
+        {
+          id: '00001',
+          firstName: 'Alex',
+          lastName: 'Reseller',
+          primaryContact: true,
+          userDetail: { id: '00002', username: 'alexreseller', userStatus: 0 },
+        },
+      ],
+    };
+  }
+
+  const MAPPING = [{ group: 'PBX', ns: 'NS', valueField: 'Domain', qualifierField: 'Site' }];
+
+  function mockFor(record: Record<string, unknown>) {
+    return mockFetch({
+      handler: (call) =>
+        call.method === 'GET' ? { body: record } : { body: { ...record, status: 'OK' } },
+    });
+  }
+
+  it('does not send the contact key at all', async () => {
+    // Dropping only `userDetail` is NOT enough: the server validates the stored usernames whenever
+    // `contact` appears in the payload, whatever it contains. Measured against a live tenant.
+    const mock = mockFor(withLegacyLogin());
+    const client = new OneBillWriteClient({ ...TEST_CONFIG, fetchImpl: mock.fetchImpl });
+    await client
+      .setSubscriberLinks('CLI00000', [{ ns: 'NS', value: 'acme.12345.service' }], MAPPING)
+      .catch(() => undefined);
+
+    const put = mock.apiCalls.find((c) => c.method === 'PUT')!;
+    expect(Object.keys(put.body)).not.toContain('contact');
+  });
+
+  it('strips it on the externalId path too, not just the links path', async () => {
+    const mock = mockFor(withLegacyLogin());
+    const client = new OneBillWriteClient({ ...TEST_CONFIG, fetchImpl: mock.fetchImpl });
+    await client.setSubscriberExternalId('CLI00000', 'NS:acme.12345.service').catch(() => undefined);
+
+    const put = mock.apiCalls.find((c) => c.method === 'PUT')!;
+    expect(Object.keys(put.body)).not.toContain('contact');
+  });
+
+  it('still sends the rest of the record', async () => {
+    const mock = mockFor(withLegacyLogin());
+    const client = new OneBillWriteClient({ ...TEST_CONFIG, fetchImpl: mock.fetchImpl });
+    await client
+      .setSubscriberLinks('CLI00000', [{ ns: 'NS', value: 'acme.12345.service' }], MAPPING)
+      .catch(() => undefined);
+
+    const put = mock.apiCalls.find((c) => c.method === 'PUT')!;
+    expect(put.body.accountNumber).toBe('CLI00000');
+    expect(put.body.externalId).toBe('NS:acme.12345.service');
+  });
+});
