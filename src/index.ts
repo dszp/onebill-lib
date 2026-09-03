@@ -168,6 +168,18 @@ export {
   type UsageVerdict,
 } from './usage.js';
 
+// Recurring-subscription reconciliation. Pure functions over records — fetches nothing, writes nothing.
+export {
+  compareRecurring,
+  type BaselineEntry,
+  type ComparisonRow,
+  type CompareRecurringInput,
+  type RecurringComparison,
+  type RecurringRule,
+  type RecurringVerdict,
+  type UnmappedOffer,
+} from './recurring.js';
+
 // Reading the input for reconciliation. The only I/O in this area — the layers above are pure.
 export {
   gatherUsageRows,

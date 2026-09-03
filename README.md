@@ -333,6 +333,45 @@ destroy a long sweep — check it before trusting the report. A read that fails 
 failure; `retried` says how often that happened. OneBill's own answers — 4xx, in-band failures — are
 never retried.
 
+## Reconciling recurring subscriptions
+
+`compareRecurring` answers a different question from the usage reconciler: not "is usage flowing", but
+"does the quantity on the bill still match what the customer actually has".
+
+You supply three things: the account's subscriptions, a count of the real world, and a **rulebook**
+saying which offer counts toward which dimension. The library ships no offer names — what a seat
+includes is a sales decision, not a property of billing software.
+
+```ts
+import { compareRecurring, type RecurringRule } from '@dszp/onebill-lib';
+
+const rules: RecurringRule[] = [
+  { offer: 'Seat Tier One', counts: 'extensions.total', group: 'seats' },
+  { offer: 'Seat Tier Two', counts: 'extensions.total', group: 'seats' },
+  { offer: 'Number Pack', counts: 'dids.total', group: 'numbers', perUnit: 10 },
+  { offer: 'Emergency Location', counts: 'e911Addresses', alsoCounts: { 'dids.total': 1 } },
+];
+
+const inventory = { extensions: { total: 12 }, dids: { total: 14 }, e911Addresses: 1 };
+
+const out = compareRecurring({ subscriptions, inventory, rules });
+// out.rows     - one per group: { group, dimension, billed, observed, verdict, offers }
+// out.unmapped - active recurring offers no rule accounts for
+```
+
+`inventory` is any object whose `counts` paths end in a number, so this works over whatever you
+count — extensions, mailboxes, licences, doors.
+
+**Verdicts.** `match` when observed equals billed. Pass `baselines` — what an operator previously
+declared correct for a group — and a difference becomes `accepted` while it holds and `drift` once
+observed moves away from it. Without a baseline, a difference is `unbaselined`: nobody has said yet
+whether it is normal.
+
+Only offers carrying a `REC` charge and inside their activation window are counted; `ONE_TIME` and
+`USAGE` are ignored, and `USAGE` has its own reconciler above. Activity is the window intersection of
+the subscription and the offer, for the reason given in that section: the numeric `status` and `state`
+vocabularies are undocumented, so this library reads dates rather than guessing at them.
+
 ## Invoices
 
 `listAllInvoices` walks the invoice list; `getInvoiceDetail` reads one invoice in full, down to the

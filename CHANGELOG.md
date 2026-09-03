@@ -5,6 +5,24 @@ All notable changes to `@dszp/onebill-lib` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-09-03
+
+### Added
+
+- **`compareRecurring(input)`** — compares an account's active recurring offers against a count of what
+  the customer actually has, one row per rule group, with an `unmapped` list for anything no rule
+  accounts for. Pure.
+
+  The rulebook is **injected**: `RecurringRule[]` names the offers, the dotted inventory path each one
+  counts toward, an optional group to sum into, a `perUnit` multiplier for packs, and `alsoCounts` for
+  a product that contributes to a second dimension. No offer name ships in this library.
+
+  The inventory is an opaque object — a `counts` path just has to end in a number — so nothing here is
+  bound to any particular thing being counted.
+
+  With `baselines`, a known-and-accepted gap reads as `accepted` and stops shouting, and the row turns
+  `drift` only once the observed count moves away from what was accepted.
+
 ## [0.3.6] — 2026-09-03
 
 ### Added
