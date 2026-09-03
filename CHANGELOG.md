@@ -5,6 +5,25 @@ All notable changes to `@dszp/onebill-lib` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] — 2026-09-02
+
+### Fixed
+
+- **`gatherUsageRows` no longer reports an account with no subscriptions as a failure.** OneBill
+  answers `GET …/subscribers/{acct}/subscriptions` for such an account not with an empty list but
+  with an in-band failure at HTTP 200: `status: "Bad Request"`, validation code `10WS0001`,
+  `No Matching Object Found or Invalid input parameter.` Measured live 2026-09-02 on three Active
+  accounts in a 149-request sweep, one of them a freshly created account never sold anything.
+
+  The sweep now maps that specific failure to an empty `subscriptions` array, so the account
+  becomes an ordinary `none` / `unlinked` row. Any other failure is still reported.
+
+  The mapping lives in the sweep and **not** in `OneBillReadClient.getSubscriptions`, because a
+  nonexistent account number answers with the **identical** body — measured the same day against
+  two invented account numbers. Only the sweep can tell the cases apart: its account came from the
+  subscriber list moments earlier. A direct caller keeps seeing the error, and the method's doc
+  now says so.
+
 ## [0.3.4] — 2026-09-02
 
 ### Fixed

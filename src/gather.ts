@@ -26,6 +26,7 @@
  */
 
 import { attributesToLinks, type LinkMapping } from './attributes.js';
+import { OneBillApiError } from './http.js';
 import { parseExternalId, type Link } from './link.js';
 import type { Subscriber, Subscription } from './model.js';
 import type { UsageReconcileRow } from './usage.js';
@@ -181,7 +182,10 @@ export async function gatherUsageRows(
     async (sub) => {
       const accountNumber = sub.accountNumber;
       try {
-        const subscriptions = await source.getSubscriptions(accountNumber);
+        const subscriptions = await source.getSubscriptions(accountNumber).catch((error: unknown) => {
+          if (isNoSubscriptions(error)) return [];
+          throw error;
+        });
         requestCount++;
 
         let links: Link[];
@@ -222,4 +226,28 @@ export async function gatherUsageRows(
     failures,
     requestCount,
   };
+}
+
+/**
+ * OneBill's answer for an account that holds no subscriptions is not an empty list but an in-band
+ * failure at HTTP 200: `status: "Bad Request"`, validation code `10WS0001`, message
+ * `No Matching Object Found or Invalid input parameter.` Measured live 2026-09-02 on three Active
+ * accounts, one of them freshly created and never sold anything.
+ *
+ * This is mapped to "no subscriptions" HERE and not in `getSubscriptions`, because a nonexistent
+ * account answers with the **identical** body (measured the same day against two invented account
+ * numbers). Only the sweep can tell the two apart: its account came from the subscriber list
+ * moments earlier, so it exists. A direct caller asking about a bad account number must keep
+ * seeing the error rather than a reassuring `[]`.
+ */
+function isNoSubscriptions(error: unknown): boolean {
+  if (!(error instanceof OneBillApiError)) return false;
+  const body = error.body as { validationResponse?: { validationErrorInfo?: unknown } } | null;
+  const info = body?.validationResponse?.validationErrorInfo;
+  return (
+    Array.isArray(info) &&
+    info.some(
+      (e) => typeof e === 'object' && e !== null && (e as { code?: unknown }).code === '10WS0001',
+    )
+  );
 }

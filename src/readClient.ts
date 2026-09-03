@@ -306,7 +306,16 @@ export class OneBillReadClient {
     );
   }
 
-  /** The subscriptions held by one subscriber. */
+  /**
+   * The subscriptions held by one subscriber.
+   *
+   * **An account with no subscriptions does not answer `[]`.** It answers an in-band failure at
+   * HTTP 200 — code `10WS0001`, `No Matching Object Found or Invalid input parameter.` — which this
+   * method throws as {@link OneBillApiError}. It is deliberately NOT mapped to `[]` here, because a
+   * nonexistent account number answers with the identical body (both measured live 2026-09-02).
+   * Only a caller that already knows the account exists can make that call; `gatherUsageRows`
+   * does, because its accounts come from the subscriber list.
+   */
   async getSubscriptions(accountNumber: string): Promise<Subscription[]> {
     const res = await this.#http.request<SubscriptionsResponse>(
       'GET',

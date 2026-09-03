@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { gatherUsageRows, type UsageReadSource } from './gather.js';
+import { OneBillApiError } from './http.js';
 import { buildLinkSet } from './attributes.js';
 import type { Subscriber, Subscription } from './model.js';
 import { reconcileUsageSubscriptions } from './usage.js';
@@ -122,6 +123,66 @@ describe('gatherUsageRows', () => {
     expect(res.failures).toHaveLength(1);
     expect(res.failures[0]!.accountNumber).toBe('CLI00000');
     expect(String((res.failures[0]!.error as Error).message)).toMatch(/upstream exploded/);
+  });
+
+  // OneBill answers "this account has no subscriptions" with an in-band failure at HTTP 200 —
+  // code 10WS0001 — not with an empty list. Measured live 2026-09-02 on three Active accounts.
+  // A nonexistent account answers identically, so only the sweep — whose account came from the
+  // subscriber list a moment ago — may treat it as an empty row.
+  const noSubscriptions = (acct: string) =>
+    new OneBillApiError(
+      `GET /rest/SubscriberService/v1/subscribers/${acct}/subscriptions -> OneBill API: Bad Request: ...`,
+      200,
+      `/rest/SubscriberService/v1/subscribers/${acct}/subscriptions`,
+      'GET',
+      {
+        resultSize: 0,
+        status: 'Bad Request',
+        validationResponse: {
+          successful: false,
+          validationErrorInfo: [
+            { code: '10WS0001', message: 'No Matching Object Found or Invalid input parameter.', errorLevel: 0 },
+          ],
+        },
+      },
+    );
+
+  it("treats OneBill's in-band 'No Matching Object Found' as an account with no subscriptions", async () => {
+    const s = source([
+      { row: { accountNumber: 'CLI00000', externalId: 'PBX:acme.12345.service' } },
+      { row: { accountNumber: 'CLI00001' }, subs: [usageSub('other.67890.service')] },
+    ]);
+    const original = s.getSubscriptions.bind(s);
+    s.getSubscriptions = async (a: string) => {
+      if (a === 'CLI00000') throw noSubscriptions(a);
+      return original(a);
+    };
+
+    const res = await gatherUsageRows(s, { ns: 'PBX', linkSource: 'externalId' });
+    expect(res.failures).toEqual([]);
+    expect(res.rows.map((r) => r.accountNumber)).toEqual(['CLI00000', 'CLI00001']);
+    // The row is otherwise ordinary: its links still surface, so it reconciles as unlinked/none
+    // rather than vanishing.
+    expect(res.rows[0]).toEqual({
+      accountNumber: 'CLI00000',
+      links: [{ ns: 'PBX', value: 'acme.12345.service' }],
+      subscriptions: [],
+    });
+  });
+
+  it('still reports an in-band failure with any other code as a failure', async () => {
+    const s = source([{ row: { accountNumber: 'CLI00000' } }]);
+    s.getSubscriptions = async (a: string) => {
+      throw new OneBillApiError('GET ... -> OneBill API: Bad Request', 200, `/x/${a}`, 'GET', {
+        status: 'Bad Request',
+        validationResponse: {
+          validationErrorInfo: [{ code: '10PARWS0026', message: 'Invalid Account Number.' }],
+        },
+      });
+    };
+    const res = await gatherUsageRows(s, { ns: 'PBX', linkSource: 'externalId' });
+    expect(res.rows).toEqual([]);
+    expect(res.failures.map((f) => f.accountNumber)).toEqual(['CLI00000']);
   });
 
   it('reports the request count so the cost of a pass is visible', async () => {
