@@ -159,7 +159,10 @@ describe('reconcileUsageSubscriptions — the verdict table', () => {
   it('missing — linked, but nothing matched, so usage is not flowing', () => {
     const [r] = run([row({ links: [link('acme.12345.service')], subscriptions: [otherSub('X')] })]);
     expect(r!.verdict).toBe('missing');
-    expect(r!.findings[0]).toMatch(/usage is not flowing/);
+    expect(r!.findings[0]).toBe(
+      'Linked to "acme.12345.service", but no "Domain Usage" subscription on this account has ' +
+        'that as its identifier, so usage is not flowing.',
+    );
   });
 
   it('none — nothing linked and nothing matched', () => {
@@ -176,6 +179,11 @@ describe('reconcileUsageSubscriptions — the verdict table', () => {
       }),
     ]);
     expect(r!.verdict).toBe('inactive');
+    // Says WHAT matched — the offer, the identifier, and that it is the linked one — as a day.
+    expect(r!.findings).toEqual([
+      'A "Domain Usage" subscription carries the identifier "acme.12345.service" (the linked target), ' +
+        'but it is not active (ended 2020-01-01).',
+    ]);
   });
 
   it('ambiguous — two active matches, and it does not pick one', () => {
@@ -226,7 +234,9 @@ describe('reconcileUsageSubscriptions — the verdict table', () => {
       }),
     ]);
     expect(r!.verdict).toBe('ok');
-    expect(r!.findings.join(' ')).toMatch(/Also matched "old\.99999\.service", inactive/);
+    expect(r!.findings).toEqual([
+      'A "Domain Usage" subscription carries the identifier "old.99999.service", but it is not active (ended 2020-01-01).',
+    ]);
   });
 
   it('surfaces examined so a renamed product is visible per account', () => {

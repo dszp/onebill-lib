@@ -328,7 +328,10 @@ records. It defaults to reading links from the **custom-field group** rather tha
 because a report that reads the derived index cannot notice the index is wrong. That costs a GET per
 subscriber; pass `linkSource: 'externalId'` for a cheaper pass that trades away drift detection.
 Per-account failures are collected into `failures` rather than thrown, so one bad account cannot
-destroy a long sweep — check it before trusting the report.
+destroy a long sweep — check it before trusting the report. A read that fails at the transport level
+(a 5xx, a network error) is retried once after `retryDelayMs` (default 500 ms) before it counts as a
+failure; `retried` says how often that happened. OneBill's own answers — 4xx, in-band failures — are
+never retried.
 
 ## Invoices
 

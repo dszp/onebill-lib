@@ -185,6 +185,77 @@ describe('gatherUsageRows', () => {
     expect(res.failures.map((f) => f.accountNumber)).toEqual(['CLI00000']);
   });
 
+  describe('one retry on a transport failure', () => {
+    const edge525 = (acct: string) =>
+      new OneBillApiError(`GET /x/${acct} -> 525: error code: 525`, 525, `/x/${acct}`, 'GET', 'error code: 525');
+
+    it('retries a 5xx once and keeps the row', async () => {
+      const s = source([{ row: { accountNumber: 'CLI00000', externalId: 'PBX:acme.12345.service' } }]);
+      let calls = 0;
+      s.getSubscriptions = async (a: string) => {
+        calls++;
+        if (calls === 1) throw edge525(a);
+        return [];
+      };
+      const res = await gatherUsageRows(s, { ns: 'PBX', linkSource: 'externalId', retryDelayMs: 0 });
+      expect(res.failures).toEqual([]);
+      expect(res.rows.map((r) => r.accountNumber)).toEqual(['CLI00000']);
+      expect(res.retried).toBe(1);
+      expect(res.requestCount).toBe(3); // list + 2 attempts: a retry is a request too.
+    });
+
+    it('retries a network error once, and reports the second failure', async () => {
+      const s = source([{ row: { accountNumber: 'CLI00000' } }]);
+      let calls = 0;
+      s.getSubscriptions = async () => {
+        calls++;
+        throw new TypeError('fetch failed');
+      };
+      const res = await gatherUsageRows(s, { ns: 'PBX', linkSource: 'externalId', retryDelayMs: 0 });
+      expect(calls).toBe(2);
+      expect(res.failures.map((f) => f.accountNumber)).toEqual(['CLI00000']);
+      expect(res.retried).toBe(1);
+    });
+
+    it('does not retry a 4xx or an in-band failure', async () => {
+      for (const err of [
+        new OneBillApiError('GET /x -> 403', 403, '/x', 'GET', null),
+        new OneBillApiError('GET /x -> OneBill API: Bad Request', 200, '/x', 'GET', {
+          status: 'Bad Request',
+          validationResponse: { validationErrorInfo: [{ code: '10PARWS0026', message: 'Invalid Account Number.' }] },
+        }),
+      ]) {
+        const s = source([{ row: { accountNumber: 'CLI00000' } }]);
+        let calls = 0;
+        s.getSubscriptions = async () => {
+          calls++;
+          throw err;
+        };
+        const res = await gatherUsageRows(s, { ns: 'PBX', linkSource: 'externalId', retryDelayMs: 0 });
+        expect(calls).toBe(1);
+        expect(res.retried).toBe(0);
+        expect(res.failures).toHaveLength(1);
+      }
+    });
+
+    it('covers the single-record read on the group path too', async () => {
+      const s = source([
+        { row: { accountNumber: 'CLI00000' }, full: withGroup('CLI00000', 'acme.12345.service'), subs: [] },
+      ]);
+      const original = s.getSubscriber.bind(s);
+      let calls = 0;
+      s.getSubscriber = async (a: string) => {
+        calls++;
+        if (calls === 1) throw edge525(a);
+        return original(a);
+      };
+      const res = await gatherUsageRows(s, { ns: 'PBX', mapping: MAPPING, retryDelayMs: 0 });
+      expect(res.failures).toEqual([]);
+      expect(res.rows[0]!.links).toHaveLength(1);
+      expect(res.retried).toBe(1);
+    });
+  });
+
   it('reports the request count so the cost of a pass is visible', async () => {
     const rows = Array.from({ length: 3 }, (_, i) => ({
       row: { accountNumber: `CLI0000${i}` },

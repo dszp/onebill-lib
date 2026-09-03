@@ -155,10 +155,10 @@ export function findUsageSubscriptions(
     let inactiveReason: string | undefined;
     if (start !== undefined && start > now) {
       active = false;
-      inactiveReason = `not active until ${new Date(start).toISOString()}`;
+      inactiveReason = `not active until ${dayOf(start)}`;
     } else if (end !== undefined && end <= now) {
       active = false;
-      inactiveReason = `ended ${new Date(end).toISOString()}`;
+      inactiveReason = `ended ${dayOf(end)}`;
     }
 
     matched.push({
@@ -286,18 +286,26 @@ export function reconcileUsageSubscriptions(
 
     const findings: string[] = [];
     let verdict: UsageVerdict;
+    // Every finding names the offer, because "matched" on its own does not say what matched.
+    const offer = offerLabel(opts.spec);
+    const describe = (m: UsageSubscriptionMatch): string => {
+      const which = m.offerName === undefined ? offer : `"${m.offerName}"`;
+      const linked = linkSet.has(normalize(m.identifier)) ? ' (the linked target)' : '';
+      return `A ${which} subscription carries the identifier "${m.identifier}"${linked}`;
+    };
 
     if (matched.length === 0) {
       verdict = linkValues.length === 0 ? 'none' : 'missing';
       if (verdict === 'missing') {
         findings.push(
-          `Linked to ${linkValues.length} target(s) but no usage subscription matched, so usage is not flowing.`,
+          `Linked to ${quoteAll(linkValues)}, but no ${offer} subscription on this account has ` +
+            `that as its identifier, so usage is not flowing.`,
         );
       }
     } else if (activeMatches.length === 0) {
       verdict = 'inactive';
       for (const m of matched) {
-        findings.push(`Matched "${m.identifier}" but it is not active: ${m.inactiveReason}.`);
+        findings.push(`${describe(m)}, but it is not active (${m.inactiveReason}).`);
       }
     } else if (activeMatches.length > 1) {
       verdict = 'ambiguous';
@@ -328,7 +336,7 @@ export function reconcileUsageSubscriptions(
     // Always worth saying, whatever the verdict.
     for (const m of matched.filter((x) => !x.active)) {
       if (verdict !== 'inactive') {
-        findings.push(`Also matched "${m.identifier}", inactive: ${m.inactiveReason}.`);
+        findings.push(`${describe(m)}, but it is not active (${m.inactiveReason}).`);
       }
     }
 
@@ -527,4 +535,19 @@ function verdictSkipReason(verdict: UsageVerdict): string {
     default:
       return 'not eligible';
   }
+}
+
+/** A timestamp as a calendar day, UTC. A finding reads "ended 2021-03-01", not an ISO instant. */
+function dayOf(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/** How the spec's offers are named in a finding: `"Domain Usage"`, `"A" / "B"`, or plain `usage`. */
+function offerLabel(spec: UsageSubscriptionSpec): string {
+  const names = (spec.offerNames ?? []).map((n) => n.trim()).filter((n) => n !== '');
+  return names.length === 0 ? 'usage' : names.map((n) => `"${n}"`).join(' / ');
+}
+
+function quoteAll(values: readonly string[]): string {
+  return values.map((v) => `"${v}"`).join(', ');
 }

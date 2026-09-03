@@ -72,6 +72,12 @@ export interface GatherUsageRowsOptions {
   concurrency?: number;
   /** Called after each account completes, for a progress bar on a job that can take a while. */
   onProgress?: (done: number, total: number) => void;
+  /**
+   * Pause before the single retry of a per-account read that failed at the transport level — a
+   * 5xx, or a thrown network error. Defaults to 500 ms. In-band failures and 4xx are never retried;
+   * see {@link GatherResult.retried}.
+   */
+  retryDelayMs?: number;
 }
 
 export interface GatherFailure {
@@ -92,8 +98,16 @@ export interface GatherResult {
   rows: UsageReconcileRow[];
   /** Accounts whose reads failed. Never empty-and-hidden: check this before trusting the report. */
   failures: GatherFailure[];
-  /** Requests issued, so the cost of a pass is visible rather than folklore. */
+  /** Requests issued, so the cost of a pass is visible rather than folklore. Retries count. */
   requestCount: number;
+  /**
+   * Per-account reads that were retried once after a transport-level failure — a 5xx (a
+   * Cloudflare 525 to the OneBill origin has been seen mid-sweep) or a thrown network error.
+   * One retry, because a sweep of 150 reads should not lose a row to a single edge hiccup, and
+   * only one, because a second consecutive failure is no longer a hiccup. In-band failures and
+   * 4xx are OneBill's answer, not the network's, and are never retried.
+   */
+  retried: number;
 }
 
 /**
@@ -169,6 +183,22 @@ export async function gatherUsageRows(
 
   const failures: GatherFailure[] = [];
   let requestCount = 0;
+  let retried = 0;
+  const retryDelayMs = opts.retryDelayMs ?? 500;
+
+  /** One attempt, and a second only after a transport-level failure. Counts both. */
+  const read = async <T>(fn: () => Promise<T>): Promise<T> => {
+    requestCount++;
+    try {
+      return await fn();
+    } catch (error) {
+      if (!isTransportFailure(error)) throw error;
+      retried++;
+      if (retryDelayMs > 0) await new Promise((r) => setTimeout(r, retryDelayMs));
+      requestCount++;
+      return fn();
+    }
+  };
 
   const subscribers = await source.listAllSubscribers(
     opts.statuses === undefined ? {} : { statuses: opts.statuses },
@@ -182,19 +212,19 @@ export async function gatherUsageRows(
     async (sub) => {
       const accountNumber = sub.accountNumber;
       try {
-        const subscriptions = await source.getSubscriptions(accountNumber).catch((error: unknown) => {
-          if (isNoSubscriptions(error)) return [];
-          throw error;
-        });
-        requestCount++;
+        const subscriptions = await read(() => source.getSubscriptions(accountNumber)).catch(
+          (error: unknown) => {
+            if (isNoSubscriptions(error)) return [];
+            throw error;
+          },
+        );
 
         let links: Link[];
         if (linkSource === 'externalId') {
           links = parseExternalId(sub.externalId).links.filter((l) => l.ns === opts.ns);
         } else {
           // The group rides only the single-record read, never the search row.
-          const full = await source.getSubscriber(accountNumber);
-          requestCount++;
+          const full = await read(() => source.getSubscriber(accountNumber));
           links = attributesToLinks(full, opts.mapping!).filter((l) => l.ns === opts.ns);
         }
 
@@ -225,6 +255,7 @@ export async function gatherUsageRows(
     rows: rows.filter((r): r is UsageReconcileRow => r !== undefined),
     failures,
     requestCount,
+    retried,
   };
 }
 
@@ -250,4 +281,13 @@ function isNoSubscriptions(error: unknown): boolean {
       (e) => typeof e === 'object' && e !== null && (e as { code?: unknown }).code === '10WS0001',
     )
   );
+}
+
+/**
+ * A failure of the transport rather than an answer from OneBill: an HTTP 5xx, or anything that is
+ * not an `OneBillApiError` at all (a thrown `fetch` error, an abort). An `OneBillApiError` with a
+ * 4xx or a 200 is OneBill speaking, and asking again gets the same answer.
+ */
+function isTransportFailure(error: unknown): boolean {
+  return !(error instanceof OneBillApiError) || error.status >= 500;
 }

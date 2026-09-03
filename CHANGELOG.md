@@ -5,6 +5,27 @@ All notable changes to `@dszp/onebill-lib` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.6] — 2026-09-03
+
+### Added
+
+- **`gatherUsageRows` retries a per-account read once after a transport failure.** A sweep of
+  ~150 reads lost a row to a single Cloudflare 525 (SSL handshake to the OneBill origin) mid-run.
+  A 5xx, or a thrown network error, now gets one more attempt after a short pause
+  (`retryDelayMs`, default 500 ms) before the account lands in `failures`. In-band failures and
+  4xx are OneBill's answer, not the network's, and are never retried. The new `retried` count
+  beside `requestCount` says how often it happened; retries are counted as requests.
+
+### Changed
+
+- **Usage findings say what matched.** `Matched "x" but it is not active: ended
+  2021-03-01T08:00:00.000Z.` did not say what had that identifier. Every finding now names the
+  offer from `spec.offerNames` (or the matched subscription's own offer name), says whether the
+  identifier is the linked target, and prints dates as days:
+  `A "Domain Usage" subscription carries the identifier "x" (the linked target), but it is not
+  active (ended 2021-03-01).` The `missing` finding now names the linked values and the offer the
+  same way. `UsageSubscriptionMatch.inactiveReason` is a day rather than an ISO instant.
+
 ## [0.3.5] — 2026-09-02
 
 ### Fixed
