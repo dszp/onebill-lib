@@ -87,6 +87,11 @@ describe('compareRecurring', () => {
     expect(rowFor(out, 'numbers').billed).toBe(10);
   });
 
+  it('treats an explicit zero quantity as zero, not the absent-quantity default of one', () => {
+    const out = compareRecurring({ subscriptions: [rec('Seat Tier One', '0.0000000000')], inventory, rules });
+    expect(rowFor(out, 'seats').billed).toBe(0);
+  });
+
   it('adds a singles line to the same group as the pack', () => {
     const out = compareRecurring({ subscriptions: [rec('Number Pack', '1'), rec('Single Number', '3')], inventory, rules });
     expect(rowFor(out, 'numbers').billed).toBe(13);
@@ -100,6 +105,30 @@ describe('compareRecurring', () => {
   it('still counts the alsoCounts offer in its own group', () => {
     const out = compareRecurring({ subscriptions: [rec('Emergency Location', '1')], inventory, rules });
     expect(rowFor(out, 'Emergency Location').billed).toBe(1);
+  });
+
+  it('credits an alsoCounts contribution to every group sharing that dimension', () => {
+    const twoGroupRules: RecurringRule[] = [
+      { offer: 'Single Number', counts: 'dids.total', group: 'numbers' },
+      { offer: 'Toll-Free Number', counts: 'dids.total', group: 'tollfree' },
+      { offer: 'Emergency Location', counts: 'e911Addresses', alsoCounts: { 'dids.total': 1 } },
+    ];
+    const out = compareRecurring({
+      subscriptions: [rec('Single Number', '3'), rec('Toll-Free Number', '1'), rec('Emergency Location', '1')],
+      inventory,
+      rules: twoGroupRules,
+    });
+    expect(rowFor(out, 'numbers').billed).toBe(4);
+    expect(rowFor(out, 'tollfree').billed).toBe(2);
+  });
+
+  it('drops an alsoCounts contribution when no rule counts toward that dimension', () => {
+    const unmatchedAlsoCounts: RecurringRule[] = [
+      { offer: 'Emergency Location', counts: 'e911Addresses', alsoCounts: { 'dids.total': 1 } },
+    ];
+    const out = compareRecurring({ subscriptions: [rec('Emergency Location', '1')], inventory, rules: unmatchedAlsoCounts });
+    expect(rowFor(out, 'Emergency Location').billed).toBe(1);
+    expect(out.rows.length).toBe(1);
   });
 
   it('matches offer names case-insensitively after trim', () => {

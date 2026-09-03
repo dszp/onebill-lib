@@ -49,9 +49,10 @@ export interface RecurringRule {
    * whose own `counts` dimension equals that path — not a group named after the path, and not only
    * the first one found. When no group tracks that dimension, the contribution is dropped rather than
    * inventing a group for it: a row nobody configured would show a billed count with no way to explain
-   * it. Tested by "credits an alsoCounts contribution to the group holding that dimension" (a match
-   * exists) and "still counts the alsoCounts offer in its own group" (its own group has a different
-   * dimension, so the alsoCounts side has nothing to land on and is dropped there).
+   * it. Tested by "credits an alsoCounts contribution to every group sharing that dimension" (two
+   * groups both track `dids.total` and both pick up the credit) and "drops an alsoCounts contribution
+   * when no rule counts toward that dimension" (the path names nothing in the rulebook, so nothing
+   * changes).
    */
   alsoCounts?: Record<string, number>;
 }
@@ -147,11 +148,15 @@ const earlierOf = (a?: number, b?: number): number | undefined => (a === undefin
 
 /**
  * A decimal-string quantity as a number. Absent, blank or unparseable reads as 1 — a subscription with
- * no stated quantity is one of the thing, which is how the API renders the common case.
+ * no stated quantity is one of the thing, which is how the API renders the common case. A quantity that
+ * parses to any finite number 0 or greater is used as-is, `"0"` included: an offer explicitly billed at
+ * zero is a real fact about the bill, not a stand-in for "one of the default".
  */
 function quantityOf(offer: SubscriptionOffer): number {
-  const n = Number(offer.quantity);
-  return Number.isFinite(n) && n > 0 ? n : 1;
+  const raw = offer.quantity;
+  if (typeof raw !== 'string' || raw.trim() === '') return 1;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 1;
 }
 
 /** Does this offer carry a recurring charge? An offer with no charges at all is not one. */
