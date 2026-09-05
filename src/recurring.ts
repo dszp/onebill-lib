@@ -29,6 +29,19 @@
  * It is also not an invoice check. OneBill returns quantities on subscriptions and **amounts only on
  * invoices**; nothing here compares money.
  *
+ * ## A credit pays for something; an entitlement permits it
+ *
+ * `alsoCounts` says this line ALSO PAYS FOR n of that — an E911 bundle includes a number, so a number
+ * short is a deliverable missing, and the row shortfalls. `entitles` says each unit of this line
+ * PERMITS n of that at no charge — a premium seat's Teams connection is a ceiling, so using it is
+ * covered and not using it is nothing at all. The two arrive on the same `billed`/`entitled` split:
+ * `billed` is what is paid for and must exist, `entitled` is headroom above it that may or may not be
+ * taken up.
+ *
+ * A credit of either kind naming a path or group no rule tracks **creates a comparison-only row** for
+ * that key. The alternative is dropping it, which this module used to do, and a premium seat's SMS and
+ * transcription then appeared nowhere at all — the exact case an operator opens the report to see.
+ *
  * ## The inventory is an opaque tree of numbers
  *
  * A `counts` path is a dotted path into whatever object the caller passes as `inventory` — the value
@@ -70,11 +83,18 @@ export interface RecurringRule {
   /** Quantity multiplier — 10 for a pack of ten. Defaults to 1. */
   perUnit?: number;
   /**
-   * Credits: `path or group name → per-unit contribution`. Lands in every group whose dimensions
-   * include the path, or whose name equals the key — not a group invented for the key. A credit
-   * naming nothing is dropped rather than conjuring a row nobody configured and nobody can read.
+   * Credits: `path or group name → per-unit contribution`. "Each unit of this line also PAYS FOR n of
+   * that", so it adds to the target's `billed` and fewer live than billed is a shortfall. Lands in
+   * every group whose dimensions include the path, or whose name equals the key; a key naming neither
+   * gets its own comparison-only row.
    */
   alsoCounts?: Record<string, number>;
+  /**
+   * Entitlements: `path or group name → per-unit ceiling`, same key vocabulary as `alsoCounts`. "Each
+   * unit of this line ENTITLES the customer to n of that, at no charge", so it adds to the target's
+   * `entitled` — headroom, never a shortfall. Not using an entitlement is not a finding.
+   */
+  entitles?: Record<string, number>;
 }
 
 /** One thing an operator looked at and declared correct. */
@@ -90,7 +110,10 @@ export interface GroupBaseline { group: string; items: ItemAcceptance[]; groupRo
 export interface ComparisonItem { key: string; label: string; status: 'accepted' | 'unreviewed' | 'stale'; acceptance?: ItemAcceptance }
 
 export type RecurringVerdict =
-  /** Observed equals billed and no acceptance has gone stale. Nothing to explain. */
+  /**
+   * Everything billed exists, nothing beyond `billed + entitled` does, and no acceptance has gone
+   * stale. Nothing to explain — an entitlement left unused lands here.
+   */
   | 'match'
   /**
    * Observed differs from billed, the difference is exactly the one that was accepted, and no
@@ -102,6 +125,17 @@ export type RecurringVerdict =
   /** Observed differs from billed and nobody has said whether that is normal. */
   | 'unbaselined';
 
+/**
+ * Where one crediting line's contribution to a row came from. `from` is the offer name as matched — the
+ * same name the row's `offers` carry — and `quantity` the total it credited, summed over that line's
+ * keys landing on this group. Its kind says whether it paid (`alsoCounts`) or permitted (`entitles`).
+ */
+export interface ComparisonCredit {
+  from: string;
+  kind: 'alsoCounts' | 'entitles';
+  quantity: number;
+}
+
 export interface ComparisonRow {
   group: string;
   /** The first dimension — kept for callers that show one. */
@@ -110,6 +144,12 @@ export interface ComparisonRow {
   dimensions: string[];
   /** Sum of quantity x perUnit over matched active REC offers, plus any `alsoCounts` contributions. */
   billed: number;
+  /**
+   * Sum of the `entitles` contributions landing on this group — 0 when nothing entitles it. Headroom
+   * above `billed`: `observed` anywhere from `billed` to `billed + entitled` is a `match`, and staying
+   * below it is never a shortfall.
+   */
+  entitled: number;
   /** The item count where the group has a list, otherwise the summed inventory counts. */
   observed: number;
   /**
@@ -133,6 +173,16 @@ export interface ComparisonRow {
   groupRow?: GroupAcceptance;
   /** Which offers made up `billed`, in the order the subscriptions were read. */
   offers: Array<{ name: string; quantity: number; perUnit: number; status?: unknown }>;
+  /**
+   * Both kinds of credit that landed here, so a row billed entirely by other lines can say what pays
+   * for it. One entry per crediting offer name and kind, in the order the subscriptions were read.
+   */
+  credits: ComparisonCredit[];
+  /**
+   * `billed === 0 && entitled > 0` — the row exists only because something entitles it. Nothing is
+   * being paid for directly, so nothing here can be short.
+   */
+  optional: boolean;
 }
 
 /** An active recurring offer no rule accounts for. */
@@ -256,8 +306,9 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
 
   // Groups, in rulebook order — a row exists for every rule group whether or not anything matched,
   // because a line that vanished from the bill is exactly what this is for.
-  interface G { dimensions: string[]; billed: number; offers: ComparisonRow['offers'] }
+  interface G { dimensions: string[]; billed: number; entitled: number; offers: ComparisonRow['offers']; credits: Map<string, ComparisonCredit> }
   const groups = new Map<string, G>();
+  const emptyGroup = (dimensions: string[]): G => ({ dimensions, billed: 0, entitled: 0, offers: [], credits: new Map() });
   for (const r of input.rules) {
     if (r.ignore) continue;
     const g = groupNameOf(r);
@@ -265,13 +316,32 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
     // First rule wins the dimensions. Two rules in one group naming different paths is a rulebook
     // mistake; picking one deterministically and showing it on the row is more useful to whoever has
     // to fix it than an error that hides every other group.
-    if (!groups.has(g)) groups.set(g, { dimensions: pathsOf(r), billed: 0, offers: [] });
+    if (!groups.has(g)) groups.set(g, emptyGroup(pathsOf(r)));
   }
-  /** Where an `alsoCounts` credit lands: every group tracking that path, or the group of that name. */
+  /** Where a credit lands: every group tracking that path, or the group of that name. */
   const creditTargets = (key: string): string[] => {
     const out: string[] = [];
     for (const [name, g] of groups) if (name === key || g.dimensions.includes(key)) out.push(name);
     return out;
+  };
+  // A credit naming a path or group no rule tracks gets a comparison-only row of its own, named after
+  // the key and counting it. Dropping it — what this did until 0.6.0 — meant a seat's included SMS and
+  // transcription reached no row, no unmapped list and no error at all.
+  // Rulebook order, and after every rule group exists, so a key naming a group declared later still
+  // finds it rather than shadowing it.
+  for (const r of input.rules) {
+    if (r.ignore) continue;
+    for (const key of [...Object.keys(r.alsoCounts ?? {}), ...Object.keys(r.entitles ?? {})]) {
+      if (key && creditTargets(key).length === 0) groups.set(key, emptyGroup([key]));
+    }
+  }
+  /** Credit one group, keeping the provenance a reader needs to see why a row is billed at all. */
+  const credit = (target: string, from: string, kind: ComparisonCredit['kind'], amount: number): void => {
+    const g = groups.get(target)!;
+    if (kind === 'entitles') g.entitled += amount; else g.billed += amount;
+    const seen = g.credits.get(`${kind}\u0000${from}`);
+    if (seen) seen.quantity += amount;
+    else g.credits.set(`${kind}\u0000${from}`, { from, kind, quantity: amount });
   };
 
   const unmapped: UnmappedOffer[] = [], ignored: IgnoredOffer[] = [], misses = new Set<string>();
@@ -298,8 +368,11 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
       const own = groups.get(groupNameOf(rule))!;
       own.billed += quantity * perUnit;
       own.offers.push({ name, quantity, perUnit, status: offer.status });
-      for (const [key, per] of Object.entries(rule.alsoCounts ?? {})) {
-        for (const target of creditTargets(key)) groups.get(target)!.billed += quantity * (Number.isFinite(per) ? per : 0);
+      for (const kind of ['alsoCounts', 'entitles'] as const) {
+        for (const [key, per] of Object.entries(rule[kind] ?? {})) {
+          const amount = quantity * (Number.isFinite(per) ? per : 0);
+          for (const target of creditTargets(key)) credit(target, name, kind, amount);
+        }
       }
     }
   }
@@ -342,6 +415,9 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
     }
 
     const groupRow = b?.groupRow;
+    // What the bill permits: the paid quantity plus whatever entitles it. With no entitlement the two
+    // are the same number and every branch below reduces to the v2 test it replaces.
+    const covered = g.billed + g.entitled;
     let verdict: RecurringVerdict;
     if (stale > 0) {
       // An accepted item that is no longer there is a change after the decision, whatever the counts
@@ -349,16 +425,18 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
       // one new seat created, billed caught up — read as a clean match, which is exactly the case
       // per-item acceptance exists to catch.
       verdict = 'drift';
-    } else if (observed === g.billed) {
+    } else if (observed >= g.billed && observed <= covered) {
+      // Everything paid for exists and nothing beyond what is permitted does. An entitlement left
+      // unused is the customer's business, not a finding.
       verdict = 'match';
-    } else if (items && observed > g.billed) {
+    } else if (items && observed > covered) {
       // Over-observed with a list is the case items exist for: the extras are nameable.
       if (unreviewed === 0 && groupRow && groupRow.billed === g.billed) verdict = 'accepted';
       else if (groupRow) verdict = 'drift';
       else verdict = 'unbaselined';
     } else {
-      // Shortfall, or a dimension with no items: there is no item to point at for a seat that does not
-      // exist, so the group row carries the judgement exactly as the count model did.
+      // Shortfall, or any difference on a dimension with no items: there is no item to point at for a
+      // seat that does not exist, so the group row carries the judgement exactly as the count model did.
       if (!groupRow) verdict = 'unbaselined';
       else if (groupRow.accepted === observed && groupRow.billed === g.billed) verdict = 'accepted';
       else verdict = 'drift';
@@ -369,6 +447,7 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
       dimension: g.dimensions[0] ?? '',
       dimensions: g.dimensions,
       billed: g.billed,
+      entitled: g.entitled,
       observed,
       ...(missing ? { observedMissing: true } : {}),
       verdict,
@@ -377,6 +456,8 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
       stale,
       ...(groupRow ? { groupRow } : {}),
       offers: g.offers,
+      credits: [...g.credits.values()],
+      optional: g.billed === 0 && g.entitled > 0,
     };
   });
 

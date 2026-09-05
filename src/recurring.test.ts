@@ -387,13 +387,18 @@ describe('compareRecurring v2', () => {
     expect(rowFor(out, 'tollfree').billed).toBe(2);
   });
 
-  it('drops an alsoCounts contribution when nothing names that dimension or group', () => {
+  it('creates a comparison-only row for an alsoCounts credit nothing else names', () => {
     const unmatchedAlsoCounts: RecurringRule[] = [
       { offer: 'Emergency Location', counts: 'e911Addresses', alsoCounts: { 'dids.total': 1 } },
     ];
     const out = compareRecurring({ ...base, rules: unmatchedAlsoCounts, subscriptions: [rec('Emergency Location', '1')] });
     expect(rowFor(out, 'Emergency Location').billed).toBe(1);
-    expect(out.rows.length).toBe(1);
+    // v2.1: the credit is no longer dropped. Something is paying for a number, so the number gets a row.
+    const created = rowFor(out, 'dids.total');
+    expect(created.billed).toBe(1);
+    expect(created.dimensions).toEqual(['dids.total']);
+    expect(created.credits).toEqual([{ from: 'Emergency Location', kind: 'alsoCounts', quantity: 1 }]);
+    expect(out.rows.length).toBe(2);
   });
 
   it('matches offer names case-insensitively after trim', () => {
@@ -487,5 +492,139 @@ describe('compareRecurring v2', () => {
   it('with no rules at all, there are no rows', () => {
     const out = compareRecurring({ ...base, rules: [], subscriptions: [rec('Seat Tier One', '4')] });
     expect(out.rows).toEqual([]);
+  });
+});
+
+describe('compareRecurring entitlements (v2.1)', () => {
+  /** A seat whose price includes things the customer may or may not turn on. */
+  const premium: RecurringRule = {
+    offer: 'Premium Hosted Phone Seat',
+    counts: 'extensions.total',
+    group: 'seats',
+    entitles: { teamsConnected: 1, smsNumbers: 1 },
+  };
+  const live = (over: Record<string, number>) => ({ ...inventory, ...over });
+
+  it('creates an optional row for an entitlement no rule counts', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [premium],
+      subscriptions: [rec('Premium Hosted Phone Seat', '1')],
+      inventory: live({ teamsConnected: 0, smsNumbers: 0 }),
+    });
+    for (const group of ['teamsConnected', 'smsNumbers']) {
+      const row = rowFor(out, group);
+      expect(row.billed, group).toBe(0);
+      expect(row.entitled, group).toBe(1);
+      expect(row.optional, group).toBe(true);
+      expect(row.dimensions, group).toEqual([group]);
+      expect(row.credits, group).toEqual([{ from: 'Premium Hosted Phone Seat', kind: 'entitles', quantity: 1 }]);
+      // Nothing is billed and nothing is live: an unused entitlement is not a finding.
+      expect(row.verdict, group).toBe('match');
+    }
+  });
+
+  it('matches an entitlement the customer is using', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [premium],
+      subscriptions: [rec('Premium Hosted Phone Seat', '1')],
+      inventory: live({ teamsConnected: 1 }),
+    });
+    const row = rowFor(out, 'teamsConnected');
+    expect(row.observed).toBe(1);
+    expect(row.billed).toBe(0);
+    expect(row.entitled).toBe(1);
+    expect(row.verdict).toBe('match');
+  });
+
+  it('reports more of a thing than the entitlement covers', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [premium],
+      subscriptions: [rec('Premium Hosted Phone Seat', '1')],
+      inventory: live({ teamsConnected: 2 }),
+    });
+    const row = rowFor(out, 'teamsConnected');
+    expect(row.observed).toBe(2);
+    expect(row.entitled).toBe(1);
+    expect(row.verdict).toBe('unbaselined');
+  });
+
+  // ---- entitlement alongside a paid line ---------------------------------------------------------
+  const teamsRules: RecurringRule[] = [
+    { offer: 'Premium Hosted Phone Seat', counts: 'extensions.total', group: 'seats', entitles: { teamsConnected: 1 } },
+    { offer: 'MS Teams Integration', counts: 'teamsConnected', group: 'teams' },
+  ];
+  const teamsSubs = [rec('Premium Hosted Phone Seat', '2'), rec('MS Teams Integration', '1')];
+
+  it('lands the entitlement on the group already counting that path, and creates no second row', () => {
+    const out = compareRecurring({ ...base, rules: teamsRules, subscriptions: teamsSubs, inventory: live({ teamsConnected: 3 }) });
+    const row = rowFor(out, 'teams');
+    expect(row.billed).toBe(1);
+    expect(row.entitled).toBe(2);
+    expect(row.optional).toBe(false);
+    expect(row.credits).toEqual([{ from: 'Premium Hosted Phone Seat', kind: 'entitles', quantity: 2 }]);
+    expect(out.rows.some((r) => r.group === 'teamsConnected')).toBe(false);
+  });
+
+  it('matches at the top of the covered range', () => {
+    const out = compareRecurring({ ...base, rules: teamsRules, subscriptions: teamsSubs, inventory: live({ teamsConnected: 3 }) });
+    expect(rowFor(out, 'teams').verdict).toBe('match');
+  });
+
+  it('goes over one past the covered range', () => {
+    const out = compareRecurring({ ...base, rules: teamsRules, subscriptions: teamsSubs, inventory: live({ teamsConnected: 4 }) });
+    expect(rowFor(out, 'teams').verdict).toBe('unbaselined');
+  });
+
+  it('shortfalls below the billed quantity — an entitlement never covers a paid line', () => {
+    const out = compareRecurring({ ...base, rules: teamsRules, subscriptions: teamsSubs, inventory: live({ teamsConnected: 0 }) });
+    const row = rowFor(out, 'teams');
+    expect(row.observed).toBe(0);
+    expect(row.billed).toBe(1);
+    expect(row.entitled).toBe(2);
+    expect(row.verdict).toBe('unbaselined');
+  });
+
+  // ---- alsoCounts is still a deliverable ----------------------------------------------------------
+  it('an alsoCounts credit pays for its group and is named in the row credits', () => {
+    const out = compareRecurring({ ...base, subscriptions: [rec('Single Number', '14')] });
+    const before = rowFor(out, 'numbers');
+    expect(before.billed).toBe(14);
+    expect(before.observed).toBe(14);
+    expect(before.verdict).toBe('match');
+    expect(before.credits).toEqual([]);
+
+    const withE911 = compareRecurring({ ...base, subscriptions: [rec('Single Number', '14'), rec('Emergency Location', '1')] });
+    const row = rowFor(withE911, 'numbers');
+    expect(row.billed).toBe(15);
+    expect(row.entitled).toBe(0);
+    expect(row.optional).toBe(false);
+    expect(row.credits).toEqual([{ from: 'Emergency Location', kind: 'alsoCounts', quantity: 1 }]);
+    // The E911 number is a deliverable: one fewer live than billed is a shortfall, not an unused option.
+    expect(row.observed).toBe(14);
+    expect(row.verdict).toBe('unbaselined');
+  });
+
+  it('leaves entitled, credits and optional at their empty values on an ordinary row', () => {
+    const out = compareRecurring({ ...base, subscriptions: [rec('Seat Tier One', '12')] });
+    const row = rowFor(out, 'seats');
+    expect(row.entitled).toBe(0);
+    expect(row.credits).toEqual([]);
+    expect(row.optional).toBe(false);
+  });
+
+  it('sums the entitlement over the lines that grant it', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [premium],
+      subscriptions: [rec('Premium Hosted Phone Seat', '2'), { subscriptionId: 'SUB9', subscriptionOffer: [{ name: 'Premium Hosted Phone Seat', quantity: '3', subscriptionCharge: [{ type: 'REC' }] }] }],
+      inventory: live({ smsNumbers: 5 }),
+    });
+    const row = rowFor(out, 'smsNumbers');
+    expect(row.entitled).toBe(5);
+    expect(row.credits).toEqual([{ from: 'Premium Hosted Phone Seat', kind: 'entitles', quantity: 5 }]);
+    expect(row.verdict).toBe('match');
   });
 });
