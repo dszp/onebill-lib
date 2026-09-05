@@ -83,13 +83,33 @@ describe('compareRecurring v2', () => {
     expect(row.unreviewed).toBe(12);
   });
 
-  it('lists a stale acceptance on a matched row without changing the verdict', () => {
+  it('drifts a row whose count matches when an accepted item has vanished', () => {
     const baselines: GroupBaseline[] = [{ group: 'seats', items: [...allSeatKeys, 'ext:999'].map(acc) }];
     const out = compareRecurring({ ...base, subscriptions: [rec('Seat Tier One', '12')], baselines });
     const row = rowFor(out, 'seats');
-    expect(row.verdict).toBe('match');
+    expect(row.observed).toBe(12);
+    expect(row.billed).toBe(12);
+    expect(row.verdict).toBe('drift');
     expect(row.stale).toBe(1);
     expect(row.items?.find((i) => i.key === 'ext:999')?.status).toBe('stale');
+  });
+
+  it('drifts on a pure vanish: an accepted item gone and billed unchanged below the new count', () => {
+    const shrunk = allSeatKeys.slice(0, 11).map((key) => ({ key }));
+    const baselines: GroupBaseline[] = [{ group: 'seats', items: allSeatKeys.map(acc), groupRow: G(10, 12, 12) }];
+    const out = compareRecurring({
+      ...base,
+      subscriptions: [rec('Seat Tier One', '10')],
+      baselines,
+      itemsFor: (p) => (p === 'extensions.total' ? shrunk : items[p]),
+    });
+    const row = rowFor(out, 'seats');
+    expect(row.observed).toBe(11);
+    expect(row.unreviewed).toBe(0);
+    expect(row.stale).toBe(1);
+    // Without the stale rule this reads `accepted`: every present item is accepted and the group row
+    // still names billed 10. The seat that disappeared is the whole fact the operator needs.
+    expect(row.verdict).toBe('drift');
   });
 
   // ---- over-observed, nothing accepted ----------------------------------------------------------
@@ -213,6 +233,21 @@ describe('compareRecurring v2', () => {
     expect(row.items?.length).toBe(2);
     expect(row.dimensions.length).toBe(2);
     expect(row.dimension).toBe('extensions.byScope.Call Center Agent');
+  });
+
+  it('observed is the union size, not the sum, when two counts paths share keys', () => {
+    // extensions.total is ext:100..111; transcriptionEnabled is ext:100..104, wholly inside it.
+    // Summing the two counts gives 17 seats that do not exist — the union is the honest number.
+    const overlapping: RecurringRule[] = [
+      { offer: 'Seat Tier One', counts: ['extensions.total', 'transcriptionEnabled'], group: 'both' },
+    ];
+    const out = compareRecurring({ ...base, rules: overlapping, subscriptions: [rec('Seat Tier One', '12')] });
+    const row = rowFor(out, 'both');
+    expect(row.observed).toBe(12);
+    expect(row.items?.length).toBe(12);
+    expect(row.items?.length).toBe(row.observed);
+    expect(new Set(row.items?.map((i) => i.key)).size).toBe(12);
+    expect(row.verdict).toBe('match');
   });
 
   // ---- a group billed only by another rule's credits -----------------------------------------------------

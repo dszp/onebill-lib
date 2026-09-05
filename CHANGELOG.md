@@ -30,6 +30,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   individual items, and a swap that leaves the count unchanged reads `drift` instead of staying
   quietly `accepted`.
 
+  - A **stale acceptance verdicts `drift` in every branch**, the matching-count branch included: the
+    items changed after the decision, and a swap whose billed count caught up would otherwise read
+    `match`.
   - `baselines` takes **`GroupBaseline[]`** (`{ group, items: ItemAcceptance[], groupRow?: GroupAcceptance }`)
     instead of `BaselineEntry[]`. **`BaselineEntry` is removed**, and with it the row's `accepted` and
     `baseline` fields; the whole-group decision is now `ComparisonRow.groupRow`.

@@ -83,13 +83,19 @@ export interface ItemAcceptance { key: string; label: string; note?: string; dec
 export interface GroupAcceptance { billed: number; observed: number; accepted: number; note?: string; decidedAt: string; decidedBy: string }
 /** What an operator previously accepted for one group on one account. */
 export interface GroupBaseline { group: string; items: ItemAcceptance[]; groupRow?: GroupAcceptance }
-/** One thing behind a dimension, and where it stands. `stale` means accepted once, no longer present. */
+/**
+ * One thing behind a dimension, and where it stands. `stale` means accepted once, no longer present —
+ * which is a change after the decision, so it drifts the whole row.
+ */
 export interface ComparisonItem { key: string; label: string; status: 'accepted' | 'unreviewed' | 'stale'; acceptance?: ItemAcceptance }
 
 export type RecurringVerdict =
-  /** Observed equals billed. Nothing to explain. */
+  /** Observed equals billed and no acceptance has gone stale. Nothing to explain. */
   | 'match'
-  /** Observed differs from billed, and the difference is exactly the one that was accepted. */
+  /**
+   * Observed differs from billed, the difference is exactly the one that was accepted, and no
+   * accepted item has since vanished.
+   */
   | 'accepted'
   /** Something moved after a full acceptance — a new item, a vanished one, or a changed billed count. */
   | 'drift'
@@ -107,9 +113,13 @@ export interface ComparisonRow {
   /** The item count where the group has a list, otherwise the summed inventory counts. */
   observed: number;
   /**
-   * True when a dimension named nothing numeric in the inventory. A zero that means "not counted" and
-   * a zero that means "none" are different facts, and a rulebook typo produces the first while looking
-   * exactly like the second.
+   * True when one of this group's `counts` paths named nothing numeric in the inventory — a rulebook
+   * typo, or a dimension the caller does not count. A zero that means "not counted" and a zero that
+   * means "none" are different facts, and the typo produces the first while looking exactly like the
+   * second.
+   *
+   * It is a fact about the count paths, not about `observed`: where the group has an item list,
+   * `observed` is the size of that list regardless of this flag.
    */
   observedMissing?: boolean;
   verdict: RecurringVerdict;
@@ -117,7 +127,7 @@ export interface ComparisonRow {
   items?: ComparisonItem[];
   /** Present items nobody has accepted. Always 0 when `items` is undefined. */
   unreviewed: number;
-  /** Acceptances whose item is no longer present. They are listed for housekeeping. */
+  /** Acceptances whose item is no longer present. Any of these makes the verdict `drift`. */
   stale: number;
   /** Echoed whole so a row can show what the numbers were when the decision was made. */
   groupRow?: GroupAcceptance;
@@ -333,8 +343,13 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
 
     const groupRow = b?.groupRow;
     let verdict: RecurringVerdict;
-    if (observed === g.billed) {
-      // Stale acceptances are still listed for housekeeping, but they do not make a matched row shout.
+    if (stale > 0) {
+      // An accepted item that is no longer there is a change after the decision, whatever the counts
+      // now say. Testing `observed === billed` first would let a swap — one accepted seat deleted,
+      // one new seat created, billed caught up — read as a clean match, which is exactly the case
+      // per-item acceptance exists to catch.
+      verdict = 'drift';
+    } else if (observed === g.billed) {
       verdict = 'match';
     } else if (items && observed > g.billed) {
       // Over-observed with a list is the case items exist for: the extras are nameable.
