@@ -51,6 +51,25 @@ rule silently returns one page as the entire result set on half of them.
 Holding an `OneBillReadClient` is proof you cannot write — it has only GET methods, and the transport
 underneath it is private and unexported.
 
+### Catalogue
+
+```ts
+import { buildCatalogIndex, catalogLookup } from '@dszp/onebill-lib';
+
+const products = await client.listProducts();                 // summaries: id, code, name, status
+const detailed = await Promise.all(products.map((p) => client.getProduct(p.code!)));
+const catalog = buildCatalogIndex(detailed);                   // { byPlanName, products, plans }
+
+catalogLookup(catalog, offer.name);                             // -> { planName, planCode, productCode, productName }
+```
+
+A subscription line names only its price plan (`subscriptionOffer[].name`) — no plan code, no product
+code. `listProducts` names every product but not its plans; `getProduct(code)` returns one product's
+`pricePlanInfos`. `buildCatalogIndex` joins the two, keyed by the plan's name (trimmed and lowercased),
+so a rule can key on a plan or product code and still match a line by the only thing it says about
+itself. A plan with an empty code — a retail plan supplied by a reseller's upstream — is kept under
+its name with `planCode: ''`.
+
 ## Orders and quotes
 
 A **quote in OneBill is an order in a quote state**, not a separate object — so one set of methods

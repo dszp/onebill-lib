@@ -84,6 +84,10 @@ export type {
   Order,
   OrderSearchOptions,
   OrderSearchPage,
+  PricePlanInfo,
+  Product,
+  ProductSummary,
+  ProductsResponse,
   QuoteDocument,
   QuoteDocumentResponse,
   Rec,
@@ -100,6 +104,15 @@ export type {
   TaxExemptionCode,
   TaxExemptionCodes,
 } from './model.js';
+
+// The catalogue index: joins a price plan's NAME (all a subscription line carries) to its plan and
+// product codes. Pure — built from `listProducts`/`getProduct` results, fetches nothing itself.
+export {
+  buildCatalogIndex,
+  catalogLookup,
+  type CatalogEntry,
+  type CatalogIndex,
+} from './catalog.js';
 
 // The link codec.
 export {

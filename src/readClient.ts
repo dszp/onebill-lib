@@ -9,6 +9,9 @@ import type {
   Order,
   OrderSearchOptions,
   OrderSearchPage,
+  Product,
+  ProductSummary,
+  ProductsResponse,
   QuoteDocument,
   QuoteDocumentResponse,
   Subscriber,
@@ -322,6 +325,36 @@ export class OneBillReadClient {
       `/rest/SubscriberService/v1/subscribers/${assertPathSegment(accountNumber, 'account number')}/subscriptions`,
     );
     return res.subscriptions ?? [];
+  }
+
+  /**
+   * Every product in the tenant's catalogue — the operator's own AND any supplied by an upstream
+   * reseller. Summary rows only (`id`, `code`, `name`, `categoryName`, `status`); the price plans need
+   * {@link getProduct}. Pages by the short-page rule: this endpoint reports `resultSize` but not
+   * `totalCount`, and does not honour `resultCount` (26 rows came back for 5, measured 2026-07-31).
+   */
+  async listProducts(opts: { pageSize?: number; maxPages?: number } = {}): Promise<ProductSummary[]> {
+    return this.#pageThrough(
+      opts,
+      (startCount, resultCount) =>
+        this.#http.request<ProductsResponse>('GET', '/rest/ProductService/v1/products', {
+          query: { startCount, resultCount, countRequired: true },
+        }),
+      (res) => res.product ?? [],
+      'listProducts',
+      '',
+    );
+  }
+
+  /**
+   * One product with its `pricePlanInfos`. The path takes the product CODE; a numeric id answers the
+   * in-band `10PR1036` "Invalid product code" at HTTP 200, which surfaces here as {@link OneBillApiError}.
+   */
+  async getProduct(code: string): Promise<Product> {
+    return this.#http.request<Product>(
+      'GET',
+      `/rest/ProductService/v1/products/${assertPathSegment(code, 'product code')}`,
+    );
   }
 
   /**

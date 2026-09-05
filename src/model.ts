@@ -771,3 +771,10 @@ export interface InvoicePdf {
   /** The raw envelope, for anything this interface does not model. */
   raw?: Rec;
 }
+
+/** One row of `ProductService/v1/products`. */
+export interface ProductSummary { id?: string; code?: string; name?: string; categoryName?: string; status?: string; [k: string]: any }
+/** One price plan under a product, from `ProductService/v1/products/{code}`. */
+export interface PricePlanInfo { id?: string; code?: string; name?: string; pricePlanType?: string; priceplanStatus?: string; [k: string]: any }
+export interface Product extends ProductSummary { pricePlanInfos?: PricePlanInfo[] }
+export interface ProductsResponse { product?: ProductSummary[]; resultSize?: number; status?: string; [k: string]: any }

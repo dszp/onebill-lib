@@ -268,6 +268,58 @@ describe('getSubscriptions', () => {
   });
 });
 
+describe('products', () => {
+  it('listProducts pages by the short-page rule and reads the `product` envelope key', async () => {
+    // First page full (2 rows at resultCount=2), second page short (1 row): 3 rows, 2 requests.
+    const mock = mockFetch({
+      handler: (call) => {
+        const q = new URL(call.url).searchParams;
+        const start = Number(q.get('startCount') ?? 0);
+        const rows =
+          start === 0
+            ? [{ id: '1', code: 'A' }, { id: '2', code: 'B' }]
+            : [{ id: '3', code: 'C' }];
+        return { body: { product: rows, resultSize: rows.length, status: 'OK' } };
+      },
+    });
+
+    const rows = await client(mock).listProducts({ pageSize: 2 });
+
+    expect(rows).toHaveLength(3);
+    expect(mock.apiCalls).toHaveLength(2);
+    expect(new URL(mock.apiCalls[1]!.url).searchParams.get('startCount')).toBe('2');
+  });
+
+  it('getProduct GETs /rest/ProductService/v1/products/{code} and returns the record', async () => {
+    const mock = mockFetch({
+      responses: [
+        { body: { id: '8802', code: 'SVX', name: 'X', pricePlanInfos: [{ code: 'P', name: 'Plan' }] } },
+      ],
+    });
+
+    await expect(client(mock).getProduct('SVX')).resolves.toMatchObject({ code: 'SVX' });
+    expect(mock.apiCalls[0]!.url).toBe(`${B}/rest/ProductService/v1/products/SVX`);
+  });
+
+  it('getProduct throws OneBillApiError on the in-band 10PR1036 body at HTTP 200', async () => {
+    const mock = mockFetch({
+      responses: [
+        {
+          body: {
+            status: 'Bad Request',
+            validationResponse: {
+              successful: false,
+              validationErrorInfo: [{ code: '10PR1036', message: 'Invalid product code.' }],
+            },
+          },
+        },
+      ],
+    });
+
+    await expect(client(mock).getProduct('NOPE')).rejects.toBeInstanceOf(OneBillApiError);
+  });
+});
+
 describe('the read-only boundary', () => {
   // Checked by `pnpm typecheck`, not at runtime. Holding a read client must be proof you cannot
   // write, so these must stay failing-to-exist.

@@ -5,6 +5,17 @@ All notable changes to `@dszp/onebill-lib` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`listProducts()`** and **`getProduct(code)`** on `OneBillReadClient` — the product catalogue.
+  `listProducts` pages by the short-page rule and reads the `product` envelope key; `getProduct` takes
+  the product CODE (a numeric id answers the in-band `10PR1036` "Invalid product code" at HTTP 200,
+  which surfaces as `OneBillApiError`) and returns the record's `pricePlanInfos`.
+- **`buildCatalogIndex(products)`** and **`catalogLookup(index, planName)`** in `catalog.ts` — a pure
+  index joining a price plan's name (all a subscription line carries) to its plan and product codes.
+
 ## [0.4.0] — 2026-09-03
 
 ### Added

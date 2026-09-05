@@ -98,6 +98,12 @@ behaviour.
 is not honoured everywhere either. The short-page rule tolerates that; a rule based on requested page
 size alone would not.)
 
+`ProductService/v1/products/{code}` — the single-product read behind `getProduct` — is keyed by the
+product's `code`, not its `id`; a numeric id answers HTTP 200 with an in-band `10PR1036` "Invalid
+product code" error. The record it returns carries `pricePlanInfos[]`, which `listProducts` does not
+— that array is the only place a price plan's code lives, which is why `buildCatalogIndex` (in
+`catalog.ts`) exists to join the two.
+
 ## The invoice document, and the three things called "line item"
 
 `getInvoiceDetail` returns a five-level tree in which one field repeats its own name and three
