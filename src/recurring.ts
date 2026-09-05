@@ -181,6 +181,10 @@ export interface ComparisonRow {
    * means "none" are different facts, and the typo produces the first while looking exactly like the
    * second.
    *
+   * An absent bucket in a `by…` map (`extensions.byScope.Call Center Agent` on a domain with no
+   * call-centre users) is the second, not the first: a partition carries only the buckets that have
+   * members, so it reads 0 and does NOT set this flag. A missing `byScope` itself still does.
+   *
    * It is a fact about the count paths, not about `observed`: where the group has an item list,
    * `observed` is the size of that list regardless of this flag.
    */
@@ -306,12 +310,30 @@ function isActive(sub: Subscription, offer: SubscriptionOffer, now: number): boo
   return true;
 }
 
-/** Walk a dotted path to a number. `undefined` means the path named nothing numeric. */
+/**
+ * Walk a dotted path to a number. `undefined` means the path named nothing numeric — a rulebook typo,
+ * or a dimension this caller does not count.
+ *
+ * **One exception: an absent bucket in a `by…` map is 0, not "not counted".** A map whose key starts
+ * with `by` — `byScope`, `byServiceCode`, `byDeviceCount`, `byModel` — is a partition of something
+ * already counted, and a partition only carries the buckets that have members. No user holds the
+ * call-centre scope, so `extensions.byScope.Call Center Agent` is simply not there; reading that as
+ * "not counted" put a warning on every domain without call-centre users, which is most of them, and a
+ * warning that fires on the normal case teaches people to ignore the warning.
+ *
+ * The exception is exactly that narrow. A missing PARENT (`extensions.byScope` itself absent) and a
+ * missing leaf under any other object stay `undefined`: neither says anything about a partition, and
+ * both are the case the flag exists for.
+ */
 function numberAt(root: unknown, path: string): number | undefined {
+  const segs = path.split('.');
   let cur: unknown = root;
-  for (const seg of path.split('.')) {
+  for (let i = 0; i < segs.length; i++) {
     if (cur === null || typeof cur !== 'object') return undefined;
-    cur = (cur as Record<string, unknown>)[seg];
+    const next = (cur as Record<string, unknown>)[segs[i]!];
+    // `segs[i - 1]` is the key that named the object being indexed — the map, not the bucket.
+    if (next === undefined && i === segs.length - 1 && (segs[i - 1] ?? '').startsWith('by')) return 0;
+    cur = next;
   }
   return typeof cur === 'number' && Number.isFinite(cur) ? cur : undefined;
 }

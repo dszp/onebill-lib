@@ -51,6 +51,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   row is unaffected and no field changed meaning, but anything CONSTRUCTING one — a test double, a
   fixture, a projection typed as `ComparisonRow` — has to supply them.
 
+### Fixed
+
+- **An absent bucket in a `by…` map now reads as 0 rather than "not counted".** A path whose parent key
+  starts with `by` — `byScope`, `byServiceCode`, `byDeviceCount`, `byModel` — indexes a partition of
+  something already counted, and a partition carries only the buckets that have members. A domain with
+  no call-centre users has no `extensions.byScope.Call Center Agent` key at all, which set
+  `observedMissing` and told the operator "this deployment counts nothing at that path" on nearly every
+  domain. A warning that fires on the normal case is a warning people learn to skip. A missing PARENT,
+  and a missing leaf under any other object, still set the flag: neither says anything about a
+  partition, and both are what it is for.
+
 ## [0.5.0] — 2026-09-04
 
 ### Added

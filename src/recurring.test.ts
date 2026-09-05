@@ -484,6 +484,40 @@ describe('compareRecurring v2', () => {
     expect(rowFor(out, 'devices').observedMissing).toBe(true);
   });
 
+  // ---- an absent bucket in a `by…` map is none, not "not counted" -------------------------------
+  it('reads an absent bucket in a by-map as zero without flagging the dimension', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [{ group: 'wallboards', counts: 'extensions.byScope.Call Center Wallboard' }],
+      subscriptions: [],
+    });
+    const row = rowFor(out, 'wallboards');
+    expect(row.observed).toBe(0);
+    // No user holds that scope, so the bucket is simply not there. Nobody needs telling.
+    expect(row.observedMissing).toBeUndefined();
+    expect(row.verdict).toBe('match');
+  });
+
+  it('still reads a bucket that is there', () => {
+    const out = compareRecurring({ ...base, rules: [{ group: 'basic', counts: 'extensions.byScope.Basic User' }], subscriptions: [] });
+    expect(rowFor(out, 'basic').observed).toBe(10);
+  });
+
+  it('flags a missing leaf under an object that is not a by-map', () => {
+    const out = compareRecurring({ ...base, rules: [{ group: 'typo', counts: 'extensions.totl' }], subscriptions: [] });
+    expect(rowFor(out, 'typo').observedMissing).toBe(true);
+  });
+
+  it('flags a missing by-map, as opposed to a missing bucket inside one', () => {
+    const out = compareRecurring({ ...base, rules: [{ group: 'gone', counts: 'extensions.byNothing.Anything' }], subscriptions: [] });
+    expect(rowFor(out, 'gone').observedMissing).toBe(true);
+  });
+
+  it('flags a by-path whose root the inventory does not carry at all', () => {
+    const out = compareRecurring({ ...base, rules: [{ group: 'absent', counts: 'mailboxes.byScope.Shared' }], subscriptions: [] });
+    expect(rowFor(out, 'absent').observedMissing).toBe(true);
+  });
+
   it('with no rules at all, every active REC offer is unmapped', () => {
     const out = compareRecurring({ ...base, rules: [], subscriptions: [rec('Seat Tier One', '4')] });
     expect(out.unmapped.map((u) => u.name)).toEqual(['Seat Tier One']);
