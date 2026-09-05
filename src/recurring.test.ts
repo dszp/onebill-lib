@@ -387,13 +387,18 @@ describe('compareRecurring v2', () => {
     expect(rowFor(out, 'tollfree').billed).toBe(2);
   });
 
-  it('drops an alsoCounts contribution when nothing names that dimension or group', () => {
+  it('creates a comparison-only row for an alsoCounts credit nothing else names', () => {
     const unmatchedAlsoCounts: RecurringRule[] = [
       { offer: 'Emergency Location', counts: 'e911Addresses', alsoCounts: { 'dids.total': 1 } },
     ];
     const out = compareRecurring({ ...base, rules: unmatchedAlsoCounts, subscriptions: [rec('Emergency Location', '1')] });
     expect(rowFor(out, 'Emergency Location').billed).toBe(1);
-    expect(out.rows.length).toBe(1);
+    // v2.1: the credit is no longer dropped. Something is paying for a number, so the number gets a row.
+    const created = rowFor(out, 'dids.total');
+    expect(created.billed).toBe(1);
+    expect(created.dimensions).toEqual(['dids.total']);
+    expect(created.credits).toEqual([{ from: 'Emergency Location', kind: 'alsoCounts', quantity: 1 }]);
+    expect(out.rows.length).toBe(2);
   });
 
   it('matches offer names case-insensitively after trim', () => {
@@ -479,6 +484,50 @@ describe('compareRecurring v2', () => {
     expect(rowFor(out, 'devices').observedMissing).toBe(true);
   });
 
+  // ---- an absent bucket in a `by…` map is none, not "not counted" -------------------------------
+  it('reads an absent bucket in a by-map as zero without flagging the dimension', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [{ group: 'wallboards', counts: 'extensions.byScope.Call Center Wallboard' }],
+      subscriptions: [],
+    });
+    const row = rowFor(out, 'wallboards');
+    expect(row.observed).toBe(0);
+    // No user holds that scope, so the bucket is simply not there. Nobody needs telling.
+    expect(row.observedMissing).toBeUndefined();
+    expect(row.verdict).toBe('match');
+  });
+
+  it('still reads a bucket that is there', () => {
+    const out = compareRecurring({ ...base, rules: [{ group: 'basic', counts: 'extensions.byScope.Basic User' }], subscriptions: [] });
+    expect(rowFor(out, 'basic').observed).toBe(10);
+  });
+
+  it('flags a missing leaf under an object that is not a by-map', () => {
+    const out = compareRecurring({ ...base, rules: [{ group: 'typo', counts: 'extensions.totl' }], subscriptions: [] });
+    expect(rowFor(out, 'typo').observedMissing).toBe(true);
+  });
+
+  it('flags a missing by-map, as opposed to a missing bucket inside one', () => {
+    const out = compareRecurring({ ...base, rules: [{ group: 'gone', counts: 'extensions.byNothing.Anything' }], subscriptions: [] });
+    expect(rowFor(out, 'gone').observedMissing).toBe(true);
+  });
+
+  it('flags a by-path whose root the inventory does not carry at all', () => {
+    const out = compareRecurring({ ...base, rules: [{ group: 'absent', counts: 'mailboxes.byScope.Shared' }], subscriptions: [] });
+    expect(rowFor(out, 'absent').observedMissing).toBe(true);
+  });
+
+  it('does not mistake a bytes map for a partition', () => {
+    const out = compareRecurring({
+      ...base,
+      inventory: { storage: { bytes: {} } },
+      rules: [{ group: 'bytes', counts: 'storage.bytes.total' }],
+      subscriptions: [],
+    });
+    expect(rowFor(out, 'bytes').observedMissing).toBe(true);
+  });
+
   it('with no rules at all, every active REC offer is unmapped', () => {
     const out = compareRecurring({ ...base, rules: [], subscriptions: [rec('Seat Tier One', '4')] });
     expect(out.unmapped.map((u) => u.name)).toEqual(['Seat Tier One']);
@@ -487,5 +536,312 @@ describe('compareRecurring v2', () => {
   it('with no rules at all, there are no rows', () => {
     const out = compareRecurring({ ...base, rules: [], subscriptions: [rec('Seat Tier One', '4')] });
     expect(out.rows).toEqual([]);
+  });
+});
+
+describe('compareRecurring entitlements (v2.1)', () => {
+  /** A seat whose price includes things the customer may or may not turn on. */
+  const premium: RecurringRule = {
+    offer: 'Premium Hosted Phone Seat',
+    counts: 'extensions.total',
+    group: 'seats',
+    entitles: { teamsConnected: 1, smsNumbers: 1 },
+  };
+  const live = (over: Record<string, number>) => ({ ...inventory, ...over });
+
+  it('creates an optional row for an entitlement no rule counts', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [premium],
+      subscriptions: [rec('Premium Hosted Phone Seat', '1')],
+      inventory: live({ teamsConnected: 0, smsNumbers: 0 }),
+    });
+    for (const group of ['teamsConnected', 'smsNumbers']) {
+      const row = rowFor(out, group);
+      expect(row.billed, group).toBe(0);
+      expect(row.entitled, group).toBe(1);
+      expect(row.optional, group).toBe(true);
+      expect(row.dimensions, group).toEqual([group]);
+      expect(row.credits, group).toEqual([{ from: 'Premium Hosted Phone Seat', kind: 'entitles', quantity: 1 }]);
+      // Nothing is billed and nothing is live: an unused entitlement is not a finding.
+      expect(row.verdict, group).toBe('match');
+    }
+  });
+
+  it('matches an entitlement the customer is using', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [premium],
+      subscriptions: [rec('Premium Hosted Phone Seat', '1')],
+      inventory: live({ teamsConnected: 1 }),
+    });
+    const row = rowFor(out, 'teamsConnected');
+    expect(row.observed).toBe(1);
+    expect(row.billed).toBe(0);
+    expect(row.entitled).toBe(1);
+    expect(row.verdict).toBe('match');
+  });
+
+  it('reports more of a thing than the entitlement covers', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [premium],
+      subscriptions: [rec('Premium Hosted Phone Seat', '1')],
+      inventory: live({ teamsConnected: 2 }),
+    });
+    const row = rowFor(out, 'teamsConnected');
+    expect(row.observed).toBe(2);
+    expect(row.entitled).toBe(1);
+    expect(row.verdict).toBe('unbaselined');
+  });
+
+  // ---- entitlement alongside a paid line ---------------------------------------------------------
+  const teamsRules: RecurringRule[] = [
+    { offer: 'Premium Hosted Phone Seat', counts: 'extensions.total', group: 'seats', entitles: { teamsConnected: 1 } },
+    { offer: 'MS Teams Integration', counts: 'teamsConnected', group: 'teams' },
+  ];
+  const teamsSubs = [rec('Premium Hosted Phone Seat', '2'), rec('MS Teams Integration', '1')];
+
+  it('lands the entitlement on the group already counting that path, and creates no second row', () => {
+    const out = compareRecurring({ ...base, rules: teamsRules, subscriptions: teamsSubs, inventory: live({ teamsConnected: 3 }) });
+    const row = rowFor(out, 'teams');
+    expect(row.billed).toBe(1);
+    expect(row.entitled).toBe(2);
+    expect(row.optional).toBe(false);
+    expect(row.credits).toEqual([{ from: 'Premium Hosted Phone Seat', kind: 'entitles', quantity: 2 }]);
+    expect(out.rows.some((r) => r.group === 'teamsConnected')).toBe(false);
+  });
+
+  it('matches at the top of the covered range', () => {
+    const out = compareRecurring({ ...base, rules: teamsRules, subscriptions: teamsSubs, inventory: live({ teamsConnected: 3 }) });
+    expect(rowFor(out, 'teams').verdict).toBe('match');
+  });
+
+  it('goes over one past the covered range', () => {
+    const out = compareRecurring({ ...base, rules: teamsRules, subscriptions: teamsSubs, inventory: live({ teamsConnected: 4 }) });
+    expect(rowFor(out, 'teams').verdict).toBe('unbaselined');
+  });
+
+  it('shortfalls below the billed quantity — an entitlement never covers a paid line', () => {
+    const out = compareRecurring({ ...base, rules: teamsRules, subscriptions: teamsSubs, inventory: live({ teamsConnected: 0 }) });
+    const row = rowFor(out, 'teams');
+    expect(row.observed).toBe(0);
+    expect(row.billed).toBe(1);
+    expect(row.entitled).toBe(2);
+    expect(row.verdict).toBe('unbaselined');
+  });
+
+  // ---- alsoCounts is still a deliverable ----------------------------------------------------------
+  it('an alsoCounts credit pays for its group and is named in the row credits', () => {
+    const out = compareRecurring({ ...base, subscriptions: [rec('Single Number', '14')] });
+    const before = rowFor(out, 'numbers');
+    expect(before.billed).toBe(14);
+    expect(before.observed).toBe(14);
+    expect(before.verdict).toBe('match');
+    expect(before.credits).toEqual([]);
+
+    const withE911 = compareRecurring({ ...base, subscriptions: [rec('Single Number', '14'), rec('Emergency Location', '1')] });
+    const row = rowFor(withE911, 'numbers');
+    expect(row.billed).toBe(15);
+    expect(row.entitled).toBe(0);
+    expect(row.optional).toBe(false);
+    expect(row.credits).toEqual([{ from: 'Emergency Location', kind: 'alsoCounts', quantity: 1 }]);
+    // The E911 number is a deliverable: one fewer live than billed is a shortfall, not an unused option.
+    expect(row.observed).toBe(14);
+    expect(row.verdict).toBe('unbaselined');
+  });
+
+  // ---- an entitlement over a dimension that HAS items ---------------------------------------------
+  /** A premium seat counted on its own dimension, entitling one extension apiece. */
+  const seatPlusPremium: RecurringRule[] = [
+    { offer: 'Seat Tier One', counts: 'extensions.total', group: 'seats' },
+    { offer: 'Premium Hosted Phone Seat', counts: 'devices.total', group: 'premium', entitles: { 'extensions.total': 1 } },
+  ];
+
+  it('matches inside the covered range on an item-bearing dimension, unreviewed items and all', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: seatPlusPremium,
+      subscriptions: [rec('Seat Tier One', '10'), rec('Premium Hosted Phone Seat', '2')],
+    });
+    const row = rowFor(out, 'seats');
+    expect(row.billed).toBe(10);
+    expect(row.entitled).toBe(2);
+    expect(row.observed).toBe(12);
+    expect(row.items?.length).toBe(12);
+    expect(row.unreviewed).toBe(12);
+    expect(row.verdict).toBe('match');
+  });
+
+  it('takes the over branch on an item-bearing dimension one past the covered range', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: seatPlusPremium,
+      subscriptions: [rec('Seat Tier One', '10'), rec('Premium Hosted Phone Seat', '1')],
+    });
+    const row = rowFor(out, 'seats');
+    expect(row.entitled).toBe(1);
+    expect(row.observed).toBe(12);
+    expect(row.unreviewed).toBe(12);
+    expect(row.verdict).toBe('unbaselined');
+  });
+
+  // ---- an acceptance is against the entitlement that was there at the time --------------------------
+  const three = [ext(100), ext(101), ext(102)].map((key) => ({ key }));
+  const threeItems = (p: string) => (p === 'extensions.total' ? three : items[p]);
+  const acceptedThree = three.map((i) => acc(i.key));
+  /** What an operator recorded while two premium seats were entitling two extensions. */
+  const rowAcceptance: GroupAcceptance = { billed: 2, observed: 3, accepted: 3, entitled: 2, decidedAt: '2026-08-01T00:00:00.000Z', decidedBy: 'ops@example.com' };
+
+  it('matches three extensions against two billed and two entitled', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: seatPlusPremium,
+      itemsFor: threeItems,
+      subscriptions: [rec('Seat Tier One', '2'), rec('Premium Hosted Phone Seat', '2')],
+    });
+    const row = rowFor(out, 'seats');
+    expect(row.billed).toBe(2);
+    expect(row.entitled).toBe(2);
+    expect(row.observed).toBe(3);
+    expect(row.verdict).toBe('match');
+  });
+
+  it('drifts when the entitlement behind an accepted overage has gone away', () => {
+    const baselines: GroupBaseline[] = [{ group: 'seats', items: acceptedThree, groupRow: rowAcceptance }];
+    const out = compareRecurring({
+      ...base,
+      rules: seatPlusPremium,
+      itemsFor: threeItems,
+      baselines,
+      subscriptions: [rec('Seat Tier One', '2')],
+    });
+    const row = rowFor(out, 'seats');
+    expect(row.billed).toBe(2);
+    expect(row.entitled).toBe(0);
+    expect(row.observed).toBe(3);
+    expect(row.unreviewed).toBe(0);
+    // Three seats against "two billed, two entitled" was a different judgement from three against two
+    // billed alone — the premium seats paid for the ceiling, and they are gone.
+    expect(row.verdict).toBe('drift');
+  });
+
+  it('leaves a group row recorded before 0.6.0 judged exactly as it was', () => {
+    const { entitled: _dropped, ...legacy } = rowAcceptance;
+    const baselines: GroupBaseline[] = [{ group: 'seats', items: acceptedThree, groupRow: legacy }];
+    const out = compareRecurring({
+      ...base,
+      rules: seatPlusPremium,
+      itemsFor: threeItems,
+      baselines,
+      subscriptions: [rec('Seat Tier One', '2')],
+    });
+    expect(rowFor(out, 'seats').verdict).toBe('accepted');
+  });
+
+  // ---- rulebook mistakes ---------------------------------------------------------------------------
+  it('reports a negative entitlement but never lets it shrink the covered range', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [{ offer: 'Premium Hosted Phone Seat', counts: 'devices.total', group: 'premium', entitles: { teamsConnected: -1 } }],
+      subscriptions: [rec('Premium Hosted Phone Seat', '1')],
+      inventory: live({ teamsConnected: 0 }),
+    });
+    const row = rowFor(out, 'teamsConnected');
+    expect(row.entitled).toBe(-1);
+    expect(row.optional).toBe(false);
+    // Clamped: nothing is billed and nothing is live, which is a match however the rulebook is written.
+    expect(row.verdict).toBe('match');
+  });
+
+  it('aggregates credit provenance the way offer names are matched — case-insensitively after trim', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [premium],
+      subscriptions: [rec('Premium Hosted Phone Seat', '1'), rec('  premium HOSTED phone seat  ', '2')],
+      inventory: live({ smsNumbers: 3 }),
+    });
+    const row = rowFor(out, 'smsNumbers');
+    expect(row.entitled).toBe(3);
+    expect(row.credits).toEqual([{ from: 'Premium Hosted Phone Seat', kind: 'entitles', quantity: 3 }]);
+  });
+
+  it('leaves entitled, credits and optional at their empty values on an ordinary row', () => {
+    const out = compareRecurring({ ...base, subscriptions: [rec('Seat Tier One', '12')] });
+    const row = rowFor(out, 'seats');
+    expect(row.entitled).toBe(0);
+    expect(row.credits).toEqual([]);
+    expect(row.optional).toBe(false);
+  });
+
+  it('sums the entitlement over the lines that grant it', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [premium],
+      subscriptions: [rec('Premium Hosted Phone Seat', '2'), { subscriptionId: 'SUB9', subscriptionOffer: [{ name: 'Premium Hosted Phone Seat', quantity: '3', subscriptionCharge: [{ type: 'REC' }] }] }],
+      inventory: live({ smsNumbers: 5 }),
+    });
+    const row = rowFor(out, 'smsNumbers');
+    expect(row.entitled).toBe(5);
+    expect(row.credits).toEqual([{ from: 'Premium Hosted Phone Seat', kind: 'entitles', quantity: 5 }]);
+    expect(row.verdict).toBe('match');
+  });
+});
+
+describe('compareRecurring billed-as tags', () => {
+  const twoTiers: RecurringRule[] = [
+    { offer: 'Seat Tier One', counts: 'extensions.total', group: 'seats' },
+    { offer: 'Seat Tier Two', counts: 'extensions.total', group: 'seats' },
+  ];
+  const threeSeats = [ext(100), ext(101), ext(102)].map((key) => ({ key }));
+  const tag = (key: string, offer?: string): ItemAcceptance => ({ ...acc(key), ...(offer === undefined ? {} : { offer }) });
+  const tiers = {
+    ...base,
+    rules: twoTiers,
+    itemsFor: (p: string) => (p === 'extensions.total' ? threeSeats : items[p]),
+    subscriptions: [rec('Seat Tier One', '2'), rec('Seat Tier Two', '1')],
+  };
+  const namesAndTags = (out: ReturnType<typeof compareRecurring>) =>
+    rowFor(out, 'seats').offers.map((o) => ({ name: o.name, tagged: o.tagged }));
+
+  it('counts accepted items against the offer each is billed as', () => {
+    const baselines: GroupBaseline[] = [{ group: 'seats', items: [tag(ext(100), 'Seat Tier One'), tag(ext(101), 'Seat Tier One'), tag(ext(102))] }];
+    const out = compareRecurring({ ...tiers, baselines });
+    expect(namesAndTags(out)).toEqual([{ name: 'Seat Tier One', tagged: 2 }, { name: 'Seat Tier Two', tagged: 0 }]);
+    expect(rowFor(out, 'seats').untagged).toBe(1);
+    // Tags are a note on the decision, not an input to it.
+    expect(rowFor(out, 'seats').verdict).toBe('match');
+  });
+
+  it('does not count a stale acceptance toward the offer it named', () => {
+    const baselines: GroupBaseline[] = [{
+      group: 'seats',
+      items: [tag(ext(100), 'Seat Tier One'), tag(ext(101), 'Seat Tier One'), tag(ext(102)), tag('ext:999', 'Seat Tier One')],
+    }];
+    const out = compareRecurring({ ...tiers, baselines });
+    const row = rowFor(out, 'seats');
+    expect(row.stale).toBe(1);
+    // The fourth acceptance is a decision about something that is gone.
+    expect(namesAndTags(out)).toEqual([{ name: 'Seat Tier One', tagged: 2 }, { name: 'Seat Tier Two', tagged: 0 }]);
+    expect(row.untagged).toBe(1);
+  });
+
+  it('matches a stored offer name case-insensitively after trim', () => {
+    const baselines: GroupBaseline[] = [{ group: 'seats', items: [tag(ext(100), 'Seat Tier One'), tag(ext(101), 'Seat Tier One'), tag(ext(102), '  seat TIER two  ')] }];
+    const out = compareRecurring({ ...tiers, baselines });
+    expect(namesAndTags(out)).toEqual([{ name: 'Seat Tier One', tagged: 2 }, { name: 'Seat Tier Two', tagged: 1 }]);
+    expect(rowFor(out, 'seats').untagged).toBe(0);
+  });
+
+  it('leaves offers untagged and untagged at zero when nothing is accepted', () => {
+    const out = compareRecurring({ ...tiers });
+    expect(namesAndTags(out)).toEqual([{ name: 'Seat Tier One', tagged: 0 }, { name: 'Seat Tier Two', tagged: 0 }]);
+    expect(rowFor(out, 'seats').untagged).toBe(0);
+  });
+
+  it('reports untagged 0 on a row with no item list at all', () => {
+    const out = compareRecurring({ inventory, rules: twoTiers, subscriptions: [rec('Seat Tier One', '3')] });
+    expect(rowFor(out, 'seats').items).toBeUndefined();
+    expect(rowFor(out, 'seats').untagged).toBe(0);
   });
 });

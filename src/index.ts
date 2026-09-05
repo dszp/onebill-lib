@@ -185,6 +185,7 @@ export {
 export {
   compareRecurring,
   ruleKeyOf,
+  type ComparisonCredit,
   type ComparisonItem,
   type ComparisonRow,
   type CompareRecurringInput,

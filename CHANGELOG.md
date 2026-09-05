@@ -7,6 +7,70 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-05
+
+### Added
+
+- **`entitles` on `RecurringRule`** — `path or group name → per-unit ceiling`, the same key vocabulary
+  as `alsoCounts` and its opposite in meaning. `alsoCounts` says the line also PAYS FOR n of that: an
+  E911 bundle's number is a deliverable, so fewer live than billed is a shortfall. `entitles` says each
+  unit PERMITS n of that at no charge: a premium seat's Teams connection, SMS number and transcription
+  are a ceiling, so using one is covered and leaving it off is not a finding. The rulebook could not
+  express the difference before, and a seat's included options had to be modelled as things the
+  customer was perpetually short of.
+- **`ComparisonRow.entitled`** — the entitlement credits landing on the group, 0 when none.
+  **`ComparisonRow.credits`** — `{ from, kind, quantity }` per crediting offer and kind, both kinds
+  listed, so a row billed entirely by another line can say "via Premium Seat x1". `from` is the offer
+  name as matched, the same name the row's `offers` carry. **`ComparisonRow.optional`** — true when
+  `billed === 0 && entitled > 0`, a row that exists only because something entitles it.
+- **`ComparisonCredit`** exported for that field. Credits are aggregated per crediting offer name and
+  kind the way offer names are MATCHED — case-insensitively after trim — displaying the first spelling
+  seen, so two spellings of one plan do not read as two products paying for a row.
+- **`ItemAcceptance.offer`** — which offer an accepted item is billed as, a name from the row's
+  `offers[].name` matched case-insensitively after trim. Optional; every acceptance recorded so far is
+  untagged. Offer entries gain **`tagged`** (present accepted items billed as that offer — a stale
+  acceptance counts toward nothing) and rows gain **`untagged`** (accepted items naming no offer).
+  Tags are reported, never judged: nine seats tagged to a tier that bills eight is a real problem, but
+  whether the bill is short or the tag is wrong is not something this library can tell, so the verdict
+  stays on the counts and a rulebook without tags behaves identically to one with them.
+- **`GroupAcceptance.entitled`** — the row's entitlement when the decision was made. Optional: a
+  decision recorded before 0.6.0 has none and keeps its old judgement. Where it is recorded, an
+  entitlement that has since gone away invalidates the acceptance (see below).
+
+### Changed
+
+- **A credit of either kind naming a path or group no rule tracks now CREATES a comparison-only row**
+  named after the key, with that key as its single dimension. It used to be dropped, and the drop was
+  silent: a premium seat's SMS and transcription reached no row, no `unmapped` list and no error, which
+  is exactly what an operator opens the report to see. A rulebook that wants such a row named or
+  counting several paths still writes the keyless `group` rule; this only stops the hole.
+- **Verdicts read a range instead of a point when a row is entitled.** With `B` = billed (offers plus
+  `alsoCounts`) and `C` = `B + max(0, entitled)`: `match` when `B <= n <= C`, the over branch when
+  `n > C`, and the shortfall test unchanged at `n < B` — an entitlement never creates a shortfall. A
+  negative entitlement is a rulebook mistake: the row reports it, the range ignores it. Where nothing
+  entitles the row, `C == B` and every branch is the v0.5.0 test it replaces, so **no existing verdict
+  moved**. The one behaviour change is the row creation above.
+- **An accepted overage is judged against the entitlement it was accepted under.** In the over branch,
+  `accepted` now also requires `groupRow.entitled` to match the row's `entitled`, unless the decision
+  recorded none. Three extensions against "two billed, two entitled" is not the judgement "three
+  against two billed"; when the premium seats go away the row reads `drift`, which is what it is.
+- **`ComparisonRow` gained REQUIRED fields** — `entitled`, `credits`, `optional` and `untagged` on the
+  row, and `tagged` on every `offers[]` entry. Reading a row is unaffected and no field changed
+  meaning, but anything CONSTRUCTING one — a test double, a fixture, a projection typed as
+  `ComparisonRow` — has to supply them.
+
+### Fixed
+
+- **An absent bucket in a `by…` map now reads as 0 rather than "not counted".** A path whose parent key
+  reads `byX` — `byScope`, `byServiceCode`, `byDeviceCount`, `byModel`, the caller's camelCase
+  convention, so a `bytes` map is not one — indexes a partition of
+  something already counted, and a partition carries only the buckets that have members. A domain with
+  no call-centre users has no `extensions.byScope.Call Center Agent` key at all, which set
+  `observedMissing` and told the operator "this deployment counts nothing at that path" on nearly every
+  domain. A warning that fires on the normal case is a warning people learn to skip. A missing PARENT,
+  and a missing leaf under any other object, still set the flag: neither says anything about a
+  partition, and both are what it is for.
+
 ## [0.5.0] — 2026-09-04
 
 ### Added
@@ -51,8 +115,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     because no catalogue was passed or because the catalogue does not know them. A rulebook keyed only
     by name never reports one.
 
-  Verdicts, with `B` = billed, `n` = present items and `G` = the group row: `match` when `n == B`
-  (stale acceptances are listed for housekeeping but do not change it). Over-observed, `accepted` when
+  Verdicts, with `B` = billed, `n` = present items and `G` = the group row: any stale acceptance
+  verdicts `drift` first, in every branch; otherwise `match` when `n == B`. Over-observed, `accepted` when
   every present item is accepted and `G.billed == B`, `drift` when `G` exists and either an unreviewed
   item appeared or `B` moved, `unbaselined` otherwise. On a shortfall — and for a dimension with no
   item list, in either direction — the group row carries the judgement as the count model did:
