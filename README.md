@@ -439,6 +439,13 @@ Where a dimension has an item list, `observed` **is** the length of that list. T
 injected: this library never learns what an extension or a phone number is, only that a dimension may
 have keys behind it and that keys can be accepted.
 
+**Billed as.** An acceptance may record which offer the item is billed as — `ItemAcceptance.offer`, a
+name from the row's `offers[].name`, matched case-insensitively after trim. Each offer entry then
+carries `tagged` (present accepted items billed as it; a stale acceptance counts toward nothing) and
+the row carries `untagged` for accepted items naming none. Tags never enter the verdict: nine seats
+tagged to a tier billing eight is something to show a reader — "Seat Tier One x8 — 9 tagged" — not a
+discrepancy this library can adjudicate.
+
 **Verdicts.** With `B` = billed, `C` = `B + entitled` (so `C == B` unless something entitles the row),
 `n` = the present items and `G` = the group row. A **stale** acceptance — accepted once, no longer
 present — verdicts `drift` before any test below, in every branch: the membership changed after the

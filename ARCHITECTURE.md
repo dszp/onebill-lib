@@ -206,6 +206,16 @@ transcription reached no row, no `unmapped` list and no error, which is precisel
 operator opens the report to find. Every row carries `credits`, naming the offer behind each
 contribution and its kind, so a row billed entirely by another line can say what pays for it.
 
+## An acceptance can say which offer an item is billed as
+
+`ItemAcceptance.offer` names one of the row's offers, and each offer entry reports `tagged` — the
+present accepted items billed as it — against the row's `untagged`. It is deliberately inert. A row
+whose seats are tagged nine to a tier that bills eight has a real problem, but this library cannot
+tell whether the bill is short or the tag is wrong, and a verdict that guessed would be a confident
+wrong answer of exactly the kind the rest of this module refuses to give. So the counts are reported
+and the verdict is left to the numbers, which is also what keeps a rulebook without tags identical to
+one with them.
+
 ## Tax lives at two depths, and absent is not zero
 
 Tax components hang off `taxLineItem.lineItems` — the third thing in the invoice document named

@@ -26,6 +26,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`ComparisonCredit`** exported for that field. Credits are aggregated per crediting offer name and
   kind the way offer names are MATCHED — case-insensitively after trim — displaying the first spelling
   seen, so two spellings of one plan do not read as two products paying for a row.
+- **`ItemAcceptance.offer`** — which offer an accepted item is billed as, a name from the row's
+  `offers[].name` matched case-insensitively after trim. Optional; every acceptance recorded so far is
+  untagged. Offer entries gain **`tagged`** (present accepted items billed as that offer — a stale
+  acceptance counts toward nothing) and rows gain **`untagged`** (accepted items naming no offer).
+  Tags are reported, never judged: nine seats tagged to a tier that bills eight is a real problem, but
+  whether the bill is short or the tag is wrong is not something this library can tell, so the verdict
+  stays on the counts and a rulebook without tags behaves identically to one with them.
 - **`GroupAcceptance.entitled`** — the row's entitlement when the decision was made. Optional: a
   decision recorded before 0.6.0 has none and keeps its old judgement. Where it is recorded, an
   entitlement that has since gone away invalidates the acceptance (see below).
@@ -47,14 +54,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `accepted` now also requires `groupRow.entitled` to match the row's `entitled`, unless the decision
   recorded none. Three extensions against "two billed, two entitled" is not the judgement "three
   against two billed"; when the premium seats go away the row reads `drift`, which is what it is.
-- **`ComparisonRow` gained three REQUIRED fields** — `entitled`, `credits` and `optional`. Reading a
-  row is unaffected and no field changed meaning, but anything CONSTRUCTING one — a test double, a
-  fixture, a projection typed as `ComparisonRow` — has to supply them.
+- **`ComparisonRow` gained REQUIRED fields** — `entitled`, `credits`, `optional` and `untagged` on the
+  row, and `tagged` on every `offers[]` entry. Reading a row is unaffected and no field changed
+  meaning, but anything CONSTRUCTING one — a test double, a fixture, a projection typed as
+  `ComparisonRow` — has to supply them.
 
 ### Fixed
 
 - **An absent bucket in a `by…` map now reads as 0 rather than "not counted".** A path whose parent key
-  starts with `by` — `byScope`, `byServiceCode`, `byDeviceCount`, `byModel` — indexes a partition of
+  reads `byX` — `byScope`, `byServiceCode`, `byDeviceCount`, `byModel`, the caller's camelCase
+  convention, so a `bytes` map is not one — indexes a partition of
   something already counted, and a partition carries only the buckets that have members. A domain with
   no call-centre users has no `extensions.byScope.Call Center Agent` key at all, which set
   `observedMissing` and told the operator "this deployment counts nothing at that path" on nearly every

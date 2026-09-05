@@ -106,7 +106,23 @@ export interface RecurringRule {
 }
 
 /** One thing an operator looked at and declared correct. */
-export interface ItemAcceptance { key: string; label: string; note?: string; decidedAt: string; decidedBy: string }
+export interface ItemAcceptance {
+  key: string;
+  label: string;
+  /**
+   * Which offer this item is billed as — a name from the row's `offers[].name`, matched the way offer
+   * names are matched everywhere else: case-insensitively after trim. Absent means untagged, which
+   * every acceptance recorded before 0.6.0 is.
+   *
+   * It is a note on the decision, never an input to it: the verdict compares counts, and an operator
+   * who tags nine seats to a tier that bills eight has recorded something for a reader to act on, not
+   * a discrepancy this library can adjudicate.
+   */
+  offer?: string;
+  note?: string;
+  decidedAt: string;
+  decidedBy: string;
+}
 /** A whole-group decision — what a shortfall or an item-less dimension is judged against. */
 export interface GroupAcceptance {
   billed: number;
@@ -194,12 +210,23 @@ export interface ComparisonRow {
   items?: ComparisonItem[];
   /** Present items nobody has accepted. Always 0 when `items` is undefined. */
   unreviewed: number;
+  /** Present accepted items whose acceptance names no offer. Always 0 when `items` is undefined. */
+  untagged: number;
   /** Acceptances whose item is no longer present. Any of these makes the verdict `drift`. */
   stale: number;
   /** Echoed whole so a row can show what the numbers were when the decision was made. */
   groupRow?: GroupAcceptance;
-  /** Which offers made up `billed`, in the order the subscriptions were read. */
-  offers: Array<{ name: string; quantity: number; perUnit: number; status?: unknown }>;
+  /**
+   * Which offers made up `billed`, in the order the subscriptions were read. `tagged` counts the
+   * PRESENT accepted items billed as this offer — a stale acceptance is a decision about something
+   * that is gone, so it counts toward nothing. An acceptance naming an offer this row no longer
+   * carries appears in no entry, which is visible here as the offer's absence.
+   *
+   * Two lines of the same plan are two entries, and each reports the count for that NAME, so their
+   * `tagged` figures repeat rather than dividing between them: an acceptance names a plan, not a
+   * subscription line.
+   */
+  offers: Array<{ name: string; quantity: number; perUnit: number; tagged: number; status?: unknown }>;
   /**
    * Both kinds of credit that landed here, so a row billed entirely by other lines can say what pays
    * for it. One entry per crediting offer name and kind, in the order the subscriptions were read.
@@ -310,12 +337,15 @@ function isActive(sub: Subscription, offer: SubscriptionOffer, now: number): boo
   return true;
 }
 
+/** A partition map by the caller's camelCase convention: `byScope`, `byModel` — but not `bytes`. */
+const BY_MAP = /^by[A-Z]/;
+
 /**
  * Walk a dotted path to a number. `undefined` means the path named nothing numeric — a rulebook typo,
  * or a dimension this caller does not count.
  *
- * **One exception: an absent bucket in a `by…` map is 0, not "not counted".** A map whose key starts
- * with `by` — `byScope`, `byServiceCode`, `byDeviceCount`, `byModel` — is a partition of something
+ * **One exception: an absent bucket in a `by…` map is 0, not "not counted".** A map whose key reads
+ * `byX` — `byScope`, `byServiceCode`, `byDeviceCount`, `byModel` — is a partition of something
  * already counted, and a partition only carries the buckets that have members. No user holds the
  * call-centre scope, so `extensions.byScope.Call Center Agent` is simply not there; reading that as
  * "not counted" put a warning on every domain without call-centre users, which is most of them, and a
@@ -323,7 +353,8 @@ function isActive(sub: Subscription, offer: SubscriptionOffer, now: number): boo
  *
  * The exception is exactly that narrow. A missing PARENT (`extensions.byScope` itself absent) and a
  * missing leaf under any other object stay `undefined`: neither says anything about a partition, and
- * both are the case the flag exists for.
+ * both are the case the flag exists for. The prefix test is the camelCase convention — `by` followed
+ * by a capital — so a `bytes` map is not mistaken for a partition of anything.
  */
 function numberAt(root: unknown, path: string): number | undefined {
   const segs = path.split('.');
@@ -332,7 +363,7 @@ function numberAt(root: unknown, path: string): number | undefined {
     if (cur === null || typeof cur !== 'object') return undefined;
     const next = (cur as Record<string, unknown>)[segs[i]!];
     // `segs[i - 1]` is the key that named the object being indexed — the map, not the bucket.
-    if (next === undefined && i === segs.length - 1 && (segs[i - 1] ?? '').startsWith('by')) return 0;
+    if (next === undefined && i === segs.length - 1 && BY_MAP.test(segs[i - 1] ?? '')) return 0;
     cur = next;
   }
   return typeof cur === 'number' && Number.isFinite(cur) ? cur : undefined;
@@ -351,7 +382,7 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
 
   // Groups, in rulebook order — a row exists for every rule group whether or not anything matched,
   // because a line that vanished from the bill is exactly what this is for.
-  interface G { dimensions: string[]; billed: number; entitled: number; offers: ComparisonRow['offers']; credits: Map<string, ComparisonCredit> }
+  interface G { dimensions: string[]; billed: number; entitled: number; offers: Array<Omit<ComparisonRow['offers'][number], 'tagged'>>; credits: Map<string, ComparisonCredit> }
   const groups = new Map<string, G>();
   const emptyGroup = (dimensions: string[]): G => ({ dimensions, billed: 0, entitled: 0, offers: [], credits: new Map() });
   for (const r of input.rules) {
@@ -465,6 +496,17 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
       observed = present.length;
     }
 
+    // Billed as: which offer each accepted item consumes, counted per offer NAME. Information for a
+    // reader — the verdict below never looks at it.
+    let untagged = 0;
+    const taggedTo = new Map<string, number>();
+    for (const it of items ?? []) {
+      if (it.status !== 'accepted') continue;
+      const tag = norm(it.acceptance?.offer);
+      if (!tag) untagged++;
+      else taggedTo.set(tag, (taggedTo.get(tag) ?? 0) + 1);
+    }
+
     const groupRow = b?.groupRow;
     // What the bill permits: the paid quantity plus whatever entitles it. With no entitlement the two
     // are the same number and every branch below reduces to the v2 test it replaces. A NEGATIVE
@@ -511,9 +553,10 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
       verdict,
       ...(items ? { items } : {}),
       unreviewed,
+      untagged,
       stale,
       ...(groupRow ? { groupRow } : {}),
-      offers: g.offers,
+      offers: g.offers.map((o) => ({ ...o, tagged: taggedTo.get(norm(o.name)) ?? 0 })),
       credits: [...g.credits.values()],
       optional: g.billed === 0 && g.entitled > 0,
     };

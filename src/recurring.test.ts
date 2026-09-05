@@ -518,6 +518,16 @@ describe('compareRecurring v2', () => {
     expect(rowFor(out, 'absent').observedMissing).toBe(true);
   });
 
+  it('does not mistake a bytes map for a partition', () => {
+    const out = compareRecurring({
+      ...base,
+      inventory: { storage: { bytes: {} } },
+      rules: [{ group: 'bytes', counts: 'storage.bytes.total' }],
+      subscriptions: [],
+    });
+    expect(rowFor(out, 'bytes').observedMissing).toBe(true);
+  });
+
   it('with no rules at all, every active REC offer is unmapped', () => {
     const out = compareRecurring({ ...base, rules: [], subscriptions: [rec('Seat Tier One', '4')] });
     expect(out.unmapped.map((u) => u.name)).toEqual(['Seat Tier One']);
@@ -775,5 +785,63 @@ describe('compareRecurring entitlements (v2.1)', () => {
     expect(row.entitled).toBe(5);
     expect(row.credits).toEqual([{ from: 'Premium Hosted Phone Seat', kind: 'entitles', quantity: 5 }]);
     expect(row.verdict).toBe('match');
+  });
+});
+
+describe('compareRecurring billed-as tags', () => {
+  const twoTiers: RecurringRule[] = [
+    { offer: 'Seat Tier One', counts: 'extensions.total', group: 'seats' },
+    { offer: 'Seat Tier Two', counts: 'extensions.total', group: 'seats' },
+  ];
+  const threeSeats = [ext(100), ext(101), ext(102)].map((key) => ({ key }));
+  const tag = (key: string, offer?: string): ItemAcceptance => ({ ...acc(key), ...(offer === undefined ? {} : { offer }) });
+  const tiers = {
+    ...base,
+    rules: twoTiers,
+    itemsFor: (p: string) => (p === 'extensions.total' ? threeSeats : items[p]),
+    subscriptions: [rec('Seat Tier One', '2'), rec('Seat Tier Two', '1')],
+  };
+  const namesAndTags = (out: ReturnType<typeof compareRecurring>) =>
+    rowFor(out, 'seats').offers.map((o) => ({ name: o.name, tagged: o.tagged }));
+
+  it('counts accepted items against the offer each is billed as', () => {
+    const baselines: GroupBaseline[] = [{ group: 'seats', items: [tag(ext(100), 'Seat Tier One'), tag(ext(101), 'Seat Tier One'), tag(ext(102))] }];
+    const out = compareRecurring({ ...tiers, baselines });
+    expect(namesAndTags(out)).toEqual([{ name: 'Seat Tier One', tagged: 2 }, { name: 'Seat Tier Two', tagged: 0 }]);
+    expect(rowFor(out, 'seats').untagged).toBe(1);
+    // Tags are a note on the decision, not an input to it.
+    expect(rowFor(out, 'seats').verdict).toBe('match');
+  });
+
+  it('does not count a stale acceptance toward the offer it named', () => {
+    const baselines: GroupBaseline[] = [{
+      group: 'seats',
+      items: [tag(ext(100), 'Seat Tier One'), tag(ext(101), 'Seat Tier One'), tag(ext(102)), tag('ext:999', 'Seat Tier One')],
+    }];
+    const out = compareRecurring({ ...tiers, baselines });
+    const row = rowFor(out, 'seats');
+    expect(row.stale).toBe(1);
+    // The fourth acceptance is a decision about something that is gone.
+    expect(namesAndTags(out)).toEqual([{ name: 'Seat Tier One', tagged: 2 }, { name: 'Seat Tier Two', tagged: 0 }]);
+    expect(row.untagged).toBe(1);
+  });
+
+  it('matches a stored offer name case-insensitively after trim', () => {
+    const baselines: GroupBaseline[] = [{ group: 'seats', items: [tag(ext(100), 'Seat Tier One'), tag(ext(101), 'Seat Tier One'), tag(ext(102), '  seat TIER two  ')] }];
+    const out = compareRecurring({ ...tiers, baselines });
+    expect(namesAndTags(out)).toEqual([{ name: 'Seat Tier One', tagged: 2 }, { name: 'Seat Tier Two', tagged: 1 }]);
+    expect(rowFor(out, 'seats').untagged).toBe(0);
+  });
+
+  it('leaves offers untagged and untagged at zero when nothing is accepted', () => {
+    const out = compareRecurring({ ...tiers });
+    expect(namesAndTags(out)).toEqual([{ name: 'Seat Tier One', tagged: 0 }, { name: 'Seat Tier Two', tagged: 0 }]);
+    expect(rowFor(out, 'seats').untagged).toBe(0);
+  });
+
+  it('reports untagged 0 on a row with no item list at all', () => {
+    const out = compareRecurring({ inventory, rules: twoTiers, subscriptions: [rec('Seat Tier One', '3')] });
+    expect(rowFor(out, 'seats').items).toBeUndefined();
+    expect(rowFor(out, 'seats').untagged).toBe(0);
   });
 });
