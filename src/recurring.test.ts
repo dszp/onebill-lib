@@ -607,6 +607,121 @@ describe('compareRecurring entitlements (v2.1)', () => {
     expect(row.verdict).toBe('unbaselined');
   });
 
+  // ---- an entitlement over a dimension that HAS items ---------------------------------------------
+  /** A premium seat counted on its own dimension, entitling one extension apiece. */
+  const seatPlusPremium: RecurringRule[] = [
+    { offer: 'Seat Tier One', counts: 'extensions.total', group: 'seats' },
+    { offer: 'Premium Hosted Phone Seat', counts: 'devices.total', group: 'premium', entitles: { 'extensions.total': 1 } },
+  ];
+
+  it('matches inside the covered range on an item-bearing dimension, unreviewed items and all', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: seatPlusPremium,
+      subscriptions: [rec('Seat Tier One', '10'), rec('Premium Hosted Phone Seat', '2')],
+    });
+    const row = rowFor(out, 'seats');
+    expect(row.billed).toBe(10);
+    expect(row.entitled).toBe(2);
+    expect(row.observed).toBe(12);
+    expect(row.items?.length).toBe(12);
+    expect(row.unreviewed).toBe(12);
+    expect(row.verdict).toBe('match');
+  });
+
+  it('takes the over branch on an item-bearing dimension one past the covered range', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: seatPlusPremium,
+      subscriptions: [rec('Seat Tier One', '10'), rec('Premium Hosted Phone Seat', '1')],
+    });
+    const row = rowFor(out, 'seats');
+    expect(row.entitled).toBe(1);
+    expect(row.observed).toBe(12);
+    expect(row.unreviewed).toBe(12);
+    expect(row.verdict).toBe('unbaselined');
+  });
+
+  // ---- an acceptance is against the entitlement that was there at the time --------------------------
+  const three = [ext(100), ext(101), ext(102)].map((key) => ({ key }));
+  const threeItems = (p: string) => (p === 'extensions.total' ? three : items[p]);
+  const acceptedThree = three.map((i) => acc(i.key));
+  /** What an operator recorded while two premium seats were entitling two extensions. */
+  const rowAcceptance: GroupAcceptance = { billed: 2, observed: 3, accepted: 3, entitled: 2, decidedAt: '2026-08-01T00:00:00.000Z', decidedBy: 'ops@example.com' };
+
+  it('matches three extensions against two billed and two entitled', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: seatPlusPremium,
+      itemsFor: threeItems,
+      subscriptions: [rec('Seat Tier One', '2'), rec('Premium Hosted Phone Seat', '2')],
+    });
+    const row = rowFor(out, 'seats');
+    expect(row.billed).toBe(2);
+    expect(row.entitled).toBe(2);
+    expect(row.observed).toBe(3);
+    expect(row.verdict).toBe('match');
+  });
+
+  it('drifts when the entitlement behind an accepted overage has gone away', () => {
+    const baselines: GroupBaseline[] = [{ group: 'seats', items: acceptedThree, groupRow: rowAcceptance }];
+    const out = compareRecurring({
+      ...base,
+      rules: seatPlusPremium,
+      itemsFor: threeItems,
+      baselines,
+      subscriptions: [rec('Seat Tier One', '2')],
+    });
+    const row = rowFor(out, 'seats');
+    expect(row.billed).toBe(2);
+    expect(row.entitled).toBe(0);
+    expect(row.observed).toBe(3);
+    expect(row.unreviewed).toBe(0);
+    // Three seats against "two billed, two entitled" was a different judgement from three against two
+    // billed alone — the premium seats paid for the ceiling, and they are gone.
+    expect(row.verdict).toBe('drift');
+  });
+
+  it('leaves a group row recorded before 0.6.0 judged exactly as it was', () => {
+    const { entitled: _dropped, ...legacy } = rowAcceptance;
+    const baselines: GroupBaseline[] = [{ group: 'seats', items: acceptedThree, groupRow: legacy }];
+    const out = compareRecurring({
+      ...base,
+      rules: seatPlusPremium,
+      itemsFor: threeItems,
+      baselines,
+      subscriptions: [rec('Seat Tier One', '2')],
+    });
+    expect(rowFor(out, 'seats').verdict).toBe('accepted');
+  });
+
+  // ---- rulebook mistakes ---------------------------------------------------------------------------
+  it('reports a negative entitlement but never lets it shrink the covered range', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [{ offer: 'Premium Hosted Phone Seat', counts: 'devices.total', group: 'premium', entitles: { teamsConnected: -1 } }],
+      subscriptions: [rec('Premium Hosted Phone Seat', '1')],
+      inventory: live({ teamsConnected: 0 }),
+    });
+    const row = rowFor(out, 'teamsConnected');
+    expect(row.entitled).toBe(-1);
+    expect(row.optional).toBe(false);
+    // Clamped: nothing is billed and nothing is live, which is a match however the rulebook is written.
+    expect(row.verdict).toBe('match');
+  });
+
+  it('aggregates credit provenance the way offer names are matched — case-insensitively after trim', () => {
+    const out = compareRecurring({
+      ...base,
+      rules: [premium],
+      subscriptions: [rec('Premium Hosted Phone Seat', '1'), rec('  premium HOSTED phone seat  ', '2')],
+      inventory: live({ smsNumbers: 3 }),
+    });
+    const row = rowFor(out, 'smsNumbers');
+    expect(row.entitled).toBe(3);
+    expect(row.credits).toEqual([{ from: 'Premium Hosted Phone Seat', kind: 'entitles', quantity: 3 }]);
+  });
+
   it('leaves entitled, credits and optional at their empty values on an ordinary row', () => {
     const out = compareRecurring({ ...base, subscriptions: [rec('Seat Tier One', '12')] });
     const row = rowFor(out, 'seats');

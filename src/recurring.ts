@@ -87,12 +87,20 @@ export interface RecurringRule {
    * that", so it adds to the target's `billed` and fewer live than billed is a shortfall. Lands in
    * every group whose dimensions include the path, or whose name equals the key; a key naming neither
    * gets its own comparison-only row.
+   *
+   * Scales by the line's QUANTITY, not by `perUnit`: `perUnit` says how many of its OWN dimension a
+   * line is worth (ten numbers to a pack), which says nothing about how many of someone else's it
+   * pays for. A pack of ten that also carried ten E911 numbers states that as `alsoCounts: { …: 10 }`.
    */
   alsoCounts?: Record<string, number>;
   /**
    * Entitlements: `path or group name → per-unit ceiling`, same key vocabulary as `alsoCounts`. "Each
    * unit of this line ENTITLES the customer to n of that, at no charge", so it adds to the target's
    * `entitled` — headroom, never a shortfall. Not using an entitlement is not a finding.
+   *
+   * Scales by the line's QUANTITY and not by `perUnit`, exactly as `alsoCounts` does, and for the same
+   * reason. A negative ceiling is a rulebook mistake: it is reported on the row and ignored by the
+   * verdict.
    */
   entitles?: Record<string, number>;
 }
@@ -100,7 +108,22 @@ export interface RecurringRule {
 /** One thing an operator looked at and declared correct. */
 export interface ItemAcceptance { key: string; label: string; note?: string; decidedAt: string; decidedBy: string }
 /** A whole-group decision — what a shortfall or an item-less dimension is judged against. */
-export interface GroupAcceptance { billed: number; observed: number; accepted: number; note?: string; decidedAt: string; decidedBy: string }
+export interface GroupAcceptance {
+  billed: number;
+  observed: number;
+  accepted: number;
+  /**
+   * The row's `entitled` when the decision was made. Optional because a decision recorded before
+   * 0.6.0 has none — those keep the pre-entitlement behaviour rather than drifting every old row.
+   * Where it IS recorded, an entitlement that has since gone away invalidates the decision: accepting
+   * three seats against "two billed, two entitled" is not the same judgement as three against two
+   * billed alone.
+   */
+  entitled?: number;
+  note?: string;
+  decidedAt: string;
+  decidedBy: string;
+}
 /** What an operator previously accepted for one group on one account. */
 export interface GroupBaseline { group: string; items: ItemAcceptance[]; groupRow?: GroupAcceptance }
 /**
@@ -335,13 +358,19 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
       if (key && creditTargets(key).length === 0) groups.set(key, emptyGroup([key]));
     }
   }
-  /** Credit one group, keeping the provenance a reader needs to see why a row is billed at all. */
+  /**
+   * Credit one group, keeping the provenance a reader needs to see why a row is billed at all. Lines
+   * are aggregated by name the way they are MATCHED — case-insensitively after trim — so two spellings
+   * of one plan do not read as two products crediting the row. The first spelling seen is displayed,
+   * since that is the one the reader will find on the bill.
+   */
   const credit = (target: string, from: string, kind: ComparisonCredit['kind'], amount: number): void => {
     const g = groups.get(target)!;
     if (kind === 'entitles') g.entitled += amount; else g.billed += amount;
-    const seen = g.credits.get(`${kind}\u0000${from}`);
+    const at = `${kind}\u0000${norm(from)}`;
+    const seen = g.credits.get(at);
     if (seen) seen.quantity += amount;
-    else g.credits.set(`${kind}\u0000${from}`, { from, kind, quantity: amount });
+    else g.credits.set(at, { from, kind, quantity: amount });
   };
 
   const unmapped: UnmappedOffer[] = [], ignored: IgnoredOffer[] = [], misses = new Set<string>();
@@ -416,8 +445,11 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
 
     const groupRow = b?.groupRow;
     // What the bill permits: the paid quantity plus whatever entitles it. With no entitlement the two
-    // are the same number and every branch below reduces to the v2 test it replaces.
-    const covered = g.billed + g.entitled;
+    // are the same number and every branch below reduces to the v2 test it replaces. A NEGATIVE
+    // entitlement is a rulebook mistake, and it is clamped rather than obeyed — headroom below zero
+    // would turn a row that matches its billed quantity into a finding. The row still reports the sum
+    // it was given, so the mistake stays visible instead of being quietly rewritten.
+    const covered = g.billed + Math.max(0, g.entitled);
     let verdict: RecurringVerdict;
     if (stale > 0) {
       // An accepted item that is no longer there is a change after the decision, whatever the counts
@@ -431,7 +463,11 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
       verdict = 'match';
     } else if (items && observed > covered) {
       // Over-observed with a list is the case items exist for: the extras are nameable.
-      if (unreviewed === 0 && groupRow && groupRow.billed === g.billed) verdict = 'accepted';
+      // `entitled` moving matters as much as `billed` moving: the operator accepted an overage against
+      // a stated ceiling, and a premium seat going away takes the ceiling with it. An old decision
+      // that recorded no entitlement is judged as it always was.
+      if (unreviewed === 0 && groupRow && groupRow.billed === g.billed
+        && (groupRow.entitled === undefined || groupRow.entitled === g.entitled)) verdict = 'accepted';
       else if (groupRow) verdict = 'drift';
       else verdict = 'unbaselined';
     } else {

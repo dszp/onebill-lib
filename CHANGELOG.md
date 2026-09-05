@@ -23,7 +23,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   listed, so a row billed entirely by another line can say "via Premium Seat x1". `from` is the offer
   name as matched, the same name the row's `offers` carry. **`ComparisonRow.optional`** — true when
   `billed === 0 && entitled > 0`, a row that exists only because something entitles it.
-- **`ComparisonCredit`** exported for that field.
+- **`ComparisonCredit`** exported for that field. Credits are aggregated per crediting offer name and
+  kind the way offer names are MATCHED — case-insensitively after trim — displaying the first spelling
+  seen, so two spellings of one plan do not read as two products paying for a row.
+- **`GroupAcceptance.entitled`** — the row's entitlement when the decision was made. Optional: a
+  decision recorded before 0.6.0 has none and keeps its old judgement. Where it is recorded, an
+  entitlement that has since gone away invalidates the acceptance (see below).
 
 ### Changed
 
@@ -33,10 +38,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is exactly what an operator opens the report to see. A rulebook that wants such a row named or
   counting several paths still writes the keyless `group` rule; this only stops the hole.
 - **Verdicts read a range instead of a point when a row is entitled.** With `B` = billed (offers plus
-  `alsoCounts`) and `C` = `B + entitled`: `match` when `B <= n <= C`, the over branch when `n > C`, and
-  the shortfall test unchanged at `n < B` — an entitlement never creates a shortfall. Where nothing
+  `alsoCounts`) and `C` = `B + max(0, entitled)`: `match` when `B <= n <= C`, the over branch when
+  `n > C`, and the shortfall test unchanged at `n < B` — an entitlement never creates a shortfall. A
+  negative entitlement is a rulebook mistake: the row reports it, the range ignores it. Where nothing
   entitles the row, `C == B` and every branch is the v0.5.0 test it replaces, so **no existing verdict
   moved**. The one behaviour change is the row creation above.
+- **An accepted overage is judged against the entitlement it was accepted under.** In the over branch,
+  `accepted` now also requires `groupRow.entitled` to match the row's `entitled`, unless the decision
+  recorded none. Three extensions against "two billed, two entitled" is not the judgement "three
+  against two billed"; when the premium seats go away the row reads `drift`, which is what it is.
+- **`ComparisonRow` gained three REQUIRED fields** — `entitled`, `credits` and `optional`. Reading a
+  row is unaffected and no field changed meaning, but anything CONSTRUCTING one — a test double, a
+  fixture, a projection typed as `ComparisonRow` — has to supply them.
 
 ## [0.5.0] — 2026-09-04
 
@@ -82,8 +95,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     because no catalogue was passed or because the catalogue does not know them. A rulebook keyed only
     by name never reports one.
 
-  Verdicts, with `B` = billed, `n` = present items and `G` = the group row: `match` when `n == B`
-  (stale acceptances are listed for housekeeping but do not change it). Over-observed, `accepted` when
+  Verdicts, with `B` = billed, `n` = present items and `G` = the group row: any stale acceptance
+  verdicts `drift` first, in every branch; otherwise `match` when `n == B`. Over-observed, `accepted` when
   every present item is accepted and `G.billed == B`, `drift` when `G` exists and either an unreviewed
   item appeared or `B` moved, `unbaselined` otherwise. On a shortfall — and for a dimension with no
   item list, in either direction — the group row carries the judgement as the count model did:

@@ -406,11 +406,17 @@ is covered; not using it is nothing. An entitlement never creates a shortfall.
 with `billed 0, entitled 2` is `match` at 0, 1 or 2 live and only reports at 3. Such a row also carries
 **`optional: true`** — it exists only because something entitles it.
 
+Both scale by the line's **quantity**, never by `perUnit`: `perUnit` says how many of its own dimension
+a line is worth (ten numbers to a pack), which says nothing about how many of someone else's it pays
+for or permits.
+
 A credit of **either** kind naming a path or group no rule tracks **creates a comparison-only row**
 named after the key, counting that key. Nothing is dropped: before v0.6.0 a seat's included SMS and
-transcription reached no row, no `unmapped` list and no error at all. Every row carries **`credits`** —
-`{ from, kind, quantity }` per crediting offer — so a row billed entirely by another line can say
-"via Premium Seat x1".
+transcription reached no row, no `unmapped` list and no error at all. Treat a row named after a key as
+a prompt to write the keyless `group` rule for it — **baselines key on the group name**, so a decision
+recorded against `teamsConnected` follows the key, and renaming the row later orphans it. Every row
+carries **`credits`** — `{ from, kind, quantity }` per crediting offer — so a row billed entirely by
+another line can say "via Premium Seat x1".
 
 ### Accept individual items, not a count
 
@@ -434,12 +440,15 @@ injected: this library never learns what an extension or a phone number is, only
 have keys behind it and that keys can be accepted.
 
 **Verdicts.** With `B` = billed, `C` = `B + entitled` (so `C == B` unless something entitles the row),
-`n` = the present items and `G` = the group row:
+`n` = the present items and `G` = the group row. A **stale** acceptance — accepted once, no longer
+present — verdicts `drift` before any test below, in every branch: the membership changed after the
+decision, and a swap whose count caught up would otherwise read clean. Then:
 
-- `match` when `B <= n <= C`. Stale acceptances are still listed for housekeeping but do not change it.
-- Over-covered (`n > C`) — the case items exist for: `accepted` when every present item is accepted
-  and `G.billed == B`; `drift` when `G` exists and either an unreviewed item has appeared or `B` has
-  moved since the decision; `unbaselined` otherwise, with `unreviewed` saying how many remain.
+- `match` when `B <= n <= C`.
+- Over-covered (`n > C`) — the case items exist for: `accepted` when every present item is accepted,
+  `G.billed == B` and `G.entitled` either matches the row's `entitled` or is absent (a decision
+  recorded before 0.6.0); `drift` when `G` exists and any of those has moved, or an unreviewed item has
+  appeared; `unbaselined` otherwise, with `unreviewed` saying how many remain.
 - Shortfall (`n < B`): there is no item to point at for a seat that does not exist, so the group row
   carries the judgement. `accepted` when `G.accepted == n && G.billed == B`, `drift` when `G` exists
   and either differs, `unbaselined` when there is no `G`.
