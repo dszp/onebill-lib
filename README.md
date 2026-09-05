@@ -369,12 +369,18 @@ const rules: RecurringRule[] = [
   { offer: 'Seat Tier Two', counts: 'extensions.total', group: 'seats' },
   { offer: 'Number Pack', counts: 'dids.total', group: 'numbers', perUnit: 10 },
   { offer: 'Emergency Location', counts: 'e911Addresses', alsoCounts: { 'dids.total': 1 } },
+  { offer: 'Premium Seat', counts: 'extensions.total', group: 'seats',
+    entitles: { teamsConnected: 1, smsNumbers: 1 } },
 ];
 
-const inventory = { extensions: { total: 12 }, dids: { total: 14 }, e911Addresses: 1 };
+const inventory = {
+  extensions: { total: 12 }, dids: { total: 14 }, e911Addresses: 1,
+  teamsConnected: 1, smsNumbers: 0,
+};
 
 const out = compareRecurring({ subscriptions, inventory, rules });
-// out.rows          - one per group: { group, dimensions, billed, observed, verdict, items, offers }
+// out.rows          - one per group: { group, dimensions, billed, entitled, observed, verdict,
+//                     optional, items, offers, credits }
 // out.unmapped      - active recurring offers no rule accounts for
 // out.ignored       - offers an `ignore` rule deliberately excludes
 // out.catalogMisses - plan names a code-keyed rulebook could not resolve
@@ -383,6 +389,28 @@ const out = compareRecurring({ subscriptions, inventory, rules });
 `inventory` is any object whose `counts` paths end in a number, so this works over whatever you
 count — extensions, mailboxes, licences, doors. `counts` also takes an array of paths: observed is
 their sum, and the item list their union.
+
+### `alsoCounts` pays for something; `entitles` permits it
+
+The two keys share a vocabulary — `path or group name → per-unit number`, landing on every group
+whose `dimensions` include the path or whose name equals the key — and mean opposite things.
+
+An **E911 bundle includes a number**. That number is a deliverable, so `alsoCounts: { 'dids.total': 1 }`
+adds to the `numbers` row's **`billed`** and one fewer live than billed is a shortfall.
+
+A **premium seat permits** a Teams connection and an SMS number. Those are a ceiling, so
+`entitles: { teamsConnected: 1, smsNumbers: 1 }` adds to those rows' **`entitled`** instead. Using one
+is covered; not using it is nothing. An entitlement never creates a shortfall.
+
+`billed` stays the paid quantity and `covered = billed + entitled` is what the bill permits, so a row
+with `billed 0, entitled 2` is `match` at 0, 1 or 2 live and only reports at 3. Such a row also carries
+**`optional: true`** — it exists only because something entitles it.
+
+A credit of **either** kind naming a path or group no rule tracks **creates a comparison-only row**
+named after the key, counting that key. Nothing is dropped: before v0.6.0 a seat's included SMS and
+transcription reached no row, no `unmapped` list and no error at all. Every row carries **`credits`** —
+`{ from, kind, quantity }` per crediting offer — so a row billed entirely by another line can say
+"via Premium Seat x1".
 
 ### Accept individual items, not a count
 
@@ -405,10 +433,11 @@ Where a dimension has an item list, `observed` **is** the length of that list. T
 injected: this library never learns what an extension or a phone number is, only that a dimension may
 have keys behind it and that keys can be accepted.
 
-**Verdicts.** With `B` = billed, `n` = the present items and `G` = the group row:
+**Verdicts.** With `B` = billed, `C` = `B + entitled` (so `C == B` unless something entitles the row),
+`n` = the present items and `G` = the group row:
 
-- `match` when `n == B`. Stale acceptances are still listed for housekeeping but do not change it.
-- Over-observed (`n > B`) — the case items exist for: `accepted` when every present item is accepted
+- `match` when `B <= n <= C`. Stale acceptances are still listed for housekeeping but do not change it.
+- Over-covered (`n > C`) — the case items exist for: `accepted` when every present item is accepted
   and `G.billed == B`; `drift` when `G` exists and either an unreviewed item has appeared or `B` has
   moved since the decision; `unbaselined` otherwise, with `unreviewed` saying how many remain.
 - Shortfall (`n < B`): there is no item to point at for a seat that does not exist, so the group row
@@ -439,7 +468,8 @@ Two more rule forms:
 An `ignore` rule keeps the line out of `unmapped`, puts it in `ignored` with the rule key that matched
 (`ruleKeyOf` renders those), and creates no row. A rule with no key at all defines a group whose
 `billed` comes entirely from other rules' `alsoCounts` credits — whose keys may name a **group** as
-well as a dotted path.
+well as a dotted path. Writing that rule is how you give such a row real `counts` paths and a name of
+your choosing; a credit naming nothing else gets a row named after the key regardless.
 
 Only offers carrying a `REC` charge and inside their activation window are counted; `ONE_TIME` and
 `USAGE` are ignored, and `USAGE` has its own reconciler above. Activity is the window intersection of

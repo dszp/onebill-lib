@@ -7,6 +7,37 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-05
+
+### Added
+
+- **`entitles` on `RecurringRule`** — `path or group name → per-unit ceiling`, the same key vocabulary
+  as `alsoCounts` and its opposite in meaning. `alsoCounts` says the line also PAYS FOR n of that: an
+  E911 bundle's number is a deliverable, so fewer live than billed is a shortfall. `entitles` says each
+  unit PERMITS n of that at no charge: a premium seat's Teams connection, SMS number and transcription
+  are a ceiling, so using one is covered and leaving it off is not a finding. The rulebook could not
+  express the difference before, and a seat's included options had to be modelled as things the
+  customer was perpetually short of.
+- **`ComparisonRow.entitled`** — the entitlement credits landing on the group, 0 when none.
+  **`ComparisonRow.credits`** — `{ from, kind, quantity }` per crediting offer and kind, both kinds
+  listed, so a row billed entirely by another line can say "via Premium Seat x1". `from` is the offer
+  name as matched, the same name the row's `offers` carry. **`ComparisonRow.optional`** — true when
+  `billed === 0 && entitled > 0`, a row that exists only because something entitles it.
+- **`ComparisonCredit`** exported for that field.
+
+### Changed
+
+- **A credit of either kind naming a path or group no rule tracks now CREATES a comparison-only row**
+  named after the key, with that key as its single dimension. It used to be dropped, and the drop was
+  silent: a premium seat's SMS and transcription reached no row, no `unmapped` list and no error, which
+  is exactly what an operator opens the report to see. A rulebook that wants such a row named or
+  counting several paths still writes the keyless `group` rule; this only stops the hole.
+- **Verdicts read a range instead of a point when a row is entitled.** With `B` = billed (offers plus
+  `alsoCounts`) and `C` = `B + entitled`: `match` when `B <= n <= C`, the over branch when `n > C`, and
+  the shortfall test unchanged at `n < B` — an entitlement never creates a shortfall. Where nothing
+  entitles the row, `C == B` and every branch is the v0.5.0 test it replaces, so **no existing verdict
+  moved**. The one behaviour change is the row creation above.
+
 ## [0.5.0] — 2026-09-04
 
 ### Added

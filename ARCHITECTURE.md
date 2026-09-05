@@ -15,6 +15,8 @@ src/
   attributes.ts   Custom-field group <-> link mapping. Pure.
   linkIndex.ts    buildLinkIndex — a pure function over an array of subscribers.
   usage.ts        Usage-subscription reconciliation. Pure — fetches nothing, writes nothing.
+  recurring.ts    Recurring-subscription reconciliation against a caller-supplied rulebook. Pure.
+  catalog.ts      buildCatalogIndex — plan name -> plan and product code. Pure.
   invoice.ts      Invoice detail: flatten, reconcile, compare calls, per-tax totals. Pure.
   gather.ts       The one orchestrator: reads what usage.ts needs. The only I/O outside the clients.
   index.ts        The barrel. Explicit named exports only.
@@ -27,7 +29,7 @@ imports nothing — it is a string codec, and it stays testable without a networ
 ## Logic is pure; exactly one module does the fetching
 
 Every non-trivial decision this library makes lives in a pure function over plain records —
-`link.ts`, `attributes.ts`, `linkIndex.ts`, `usage.ts`, `invoice.ts`. The clients do I/O and no thinking. That is
+`link.ts`, `attributes.ts`, `linkIndex.ts`, `usage.ts`, `recurring.ts`, `invoice.ts`. The clients do I/O and no thinking. That is
 not tidiness for its own sake: it is what lets the hard parts be tested exhaustively against
 fixtures with no network, no mock server and no credentials, which is why `pnpm test` is green on a
 fresh clone.
@@ -177,6 +179,32 @@ counts exactly that difference.
 itself, which a replayed feed can cause with no earlier invoice involved. Genuine repeats exist —
 a call rated as two legs — so it returns the rows and whether their `eventId`s differ, rather than
 a verdict.
+
+## A credit pays for something; an entitlement permits it
+
+A rule's `alsoCounts` and `entitles` look alike — both are `path or group name -> per-unit number`,
+and both land on a group other than the rule's own. They answer different questions, and collapsing
+them into one number gets a customer billed for something they were never short of.
+
+An E911 bundle **includes a number**. That number is a deliverable: it is paid for, and one fewer
+live than billed means something the customer bought does not exist. So `alsoCounts` adds to the
+target's `billed`, and the shortfall test — `observed < billed` — sees it.
+
+A premium seat **permits** a Teams connection, an SMS number and transcription. Those are a ceiling:
+turning one on is covered, leaving it off is nothing at all, and there is no such thing as being one
+short of them. So `entitles` adds to `entitled`, which sits above `billed` as headroom. The verdict
+reads `observed` against a range rather than a point — `match` for anything from `billed` up to
+`billed + entitled`, `unbaselined`/`accepted`/`drift` only past the top of it — and a row with
+`billed 0, entitled n` reports `optional: true` to say it exists only because something permits it.
+
+The `entitled === 0` case is exactly the old comparison: the range collapses to the single point
+`observed === billed`, which is why v2.1 changed no existing verdict.
+
+**Neither kind is ever dropped.** A credit naming a path or group no rule tracks creates a
+comparison-only row named after the key. Before v2.1 it vanished — a seat's included SMS and
+transcription reached no row, no `unmapped` list and no error, which is precisely the thing an
+operator opens the report to find. Every row carries `credits`, naming the offer behind each
+contribution and its kind, so a row billed entirely by another line can say what pays for it.
 
 ## Tax lives at two depths, and absent is not zero
 
