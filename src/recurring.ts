@@ -6,6 +6,20 @@
  * (`OneBillReadClient.getSubscriptions`, a cache, a fixture), a count of the real world, a rulebook
  * and — optionally — what an operator has previously accepted, and it returns one row per rule group.
  *
+ * ## Acceptance is per item, not per count
+ *
+ * A count says twelve extensions exist against ten billed; it cannot say *which* two are the extra
+ * ones, so it cannot tell "the same two we already looked at" from "one of those was deleted and a
+ * different one appeared". Where the caller can supply the list behind a dimension — through
+ * `itemsFor` — the row carries one `ComparisonItem` per thing, an operator accepts individual items,
+ * and a swap that leaves the count unchanged reads as `drift` rather than staying quietly `accepted`.
+ *
+ * The item list arrives **injected**. This library never learns what an extension or a phone number
+ * is; it only knows that a dimension may have keys behind it and that keys can be accepted.
+ *
+ * Where a dimension has no list (`itemsFor` returns `undefined`, or none is supplied at all), the
+ * group row carries the judgement on its own — the count model, kept for exactly that case.
+ *
  * ## What it is NOT
  *
  * It is not a rulebook. Which offer means "a seat" and what a seat includes are **per-customer sales
@@ -31,77 +45,82 @@
  * visible false alarm, while a false "active" hides a real billing failure. The raw `status` is
  * carried through on the row's offer list for a caller that wants to show it.
  */
+import { catalogLookup, type CatalogIndex } from './catalog.js';
 import type { Subscription, SubscriptionOffer } from './model.js';
 
-/** One line of the rulebook: which offer counts toward which dimension. */
+/**
+ * One line of the rulebook: which subscription line counts toward which dimension.
+ *
+ * At most one of `offer`, `planCode` and `productCode` — a rule with none of them is a
+ * comparison-only row, a group whose billed comes entirely from other rules' `alsoCounts` credits.
+ */
 export interface RecurringRule {
-  /** The exact offer name, matched case-insensitively after trimming. */
-  offer: string;
-  /** Dotted path to a numeric leaf of the inventory, e.g. `"dids.total"`. */
-  counts: string;
-  /** Rows sharing a group are summed. Defaults to the offer name. */
+  /** Match by plan name (what a subscription line carries). */
+  offer?: string;
+  /** Match by price plan code, resolved through the catalogue index. Never matches a plan whose code is empty. */
+  planCode?: string;
+  /** Match by product code, resolved through the catalogue index — "any plan under this product I have not named". */
+  productCode?: string;
+  /** One dotted path, or several summed; observed is the sum and the item list the union. Absent only with `ignore`. */
+  counts?: string | string[];
+  /** Known and deliberately not compared. Leaves `unmapped`, lands in `ignored`, creates no row. */
+  ignore?: true;
+  /** Rules sharing a group are summed. Defaults to whichever key the rule carries. */
   group?: string;
   /** Quantity multiplier — 10 for a pack of ten. Defaults to 1. */
   perUnit?: number;
   /**
-   * Extra dimensions this offer also contributes to, e.g. an E911 product that includes a number:
-   * `{ "dids.total": 1 }`. The contribution is `count x quantity`, and it lands in **every** group
-   * whose own `counts` dimension equals that path — not a group named after the path, and not only
-   * the first one found. When no group tracks that dimension, the contribution is dropped rather than
-   * inventing a group for it: a row nobody configured would show a billed count with no way to explain
-   * it. Tested by "credits an alsoCounts contribution to every group sharing that dimension" (two
-   * groups both track `dids.total` and both pick up the credit) and "drops an alsoCounts contribution
-   * when no rule counts toward that dimension" (the path names nothing in the rulebook, so nothing
-   * changes).
+   * Credits: `path or group name → per-unit contribution`. Lands in every group whose dimensions
+   * include the path, or whose name equals the key — not a group invented for the key. A credit
+   * naming nothing is dropped rather than conjuring a row nobody configured and nobody can read.
    */
   alsoCounts?: Record<string, number>;
 }
 
+/** One thing an operator looked at and declared correct. */
+export interface ItemAcceptance { key: string; label: string; note?: string; decidedAt: string; decidedBy: string }
+/** A whole-group decision — what a shortfall or an item-less dimension is judged against. */
+export interface GroupAcceptance { billed: number; observed: number; accepted: number; note?: string; decidedAt: string; decidedBy: string }
 /** What an operator previously accepted for one group on one account. */
-export interface BaselineEntry {
-  group: string;
-  /** What was billed when the decision was made. */
-  billed: number;
-  /** What was observed when the decision was made. */
-  observed: number;
-  /** The count the operator declared correct. */
-  accepted: number;
-  note?: string;
-  /** ISO 8601. */
-  decidedAt: string;
-  /** Who decided — an identity string from the caller's own auth. */
-  decidedBy: string;
-}
+export interface GroupBaseline { group: string; items: ItemAcceptance[]; groupRow?: GroupAcceptance }
+/** One thing behind a dimension, and where it stands. `stale` means accepted once, no longer present. */
+export interface ComparisonItem { key: string; label: string; status: 'accepted' | 'unreviewed' | 'stale'; acceptance?: ItemAcceptance }
 
 export type RecurringVerdict =
   /** Observed equals billed. Nothing to explain. */
   | 'match'
-  /** Observed differs from billed, and equals what was accepted. A known, recorded gap. */
+  /** Observed differs from billed, and the difference is exactly the one that was accepted. */
   | 'accepted'
-  /** A baseline exists and observed has moved away from its accepted count. */
+  /** Something moved after a full acceptance — a new item, a vanished one, or a changed billed count. */
   | 'drift'
   /** Observed differs from billed and nobody has said whether that is normal. */
   | 'unbaselined';
 
 export interface ComparisonRow {
   group: string;
-  /** The dotted path `observed` was read from. */
+  /** The first dimension — kept for callers that show one. */
   dimension: string;
+  /** Every dotted path this group counts, in rulebook order. */
+  dimensions: string[];
   /** Sum of quantity x perUnit over matched active REC offers, plus any `alsoCounts` contributions. */
   billed: number;
-  /** The inventory count at `dimension`. Zero when the path is absent — see `observedMissing`. */
+  /** The item count where the group has a list, otherwise the summed inventory counts. */
   observed: number;
   /**
-   * True when `dimension` named nothing numeric in the inventory. A zero that means "not counted" and
+   * True when a dimension named nothing numeric in the inventory. A zero that means "not counted" and
    * a zero that means "none" are different facts, and a rulebook typo produces the first while looking
    * exactly like the second.
    */
   observedMissing?: boolean;
-  /** From the baseline, when one exists for this group. */
-  accepted?: number;
   verdict: RecurringVerdict;
-  /** Echoed whole so a caller can show what the numbers were when the decision was made. */
-  baseline?: BaselineEntry;
+  /** undefined when no dimension of this row has an item list. */
+  items?: ComparisonItem[];
+  /** Present items nobody has accepted. Always 0 when `items` is undefined. */
+  unreviewed: number;
+  /** Acceptances whose item is no longer present. They are listed for housekeeping. */
+  stale: number;
+  /** Echoed whole so a row can show what the numbers were when the decision was made. */
+  groupRow?: GroupAcceptance;
   /** Which offers made up `billed`, in the order the subscriptions were read. */
   offers: Array<{ name: string; quantity: number; perUnit: number; status?: unknown }>;
 }
@@ -115,14 +134,25 @@ export interface UnmappedOffer {
   status?: unknown;
 }
 
+/** An active recurring offer a rule deliberately excluded from comparison. */
+export interface IgnoredOffer {
+  name: string;
+  quantity: number;
+  /** The rule key that matched, e.g. `"productCode:FAX"` — so a reader can find the rule. */
+  rule: string;
+}
+
 export interface RecurringComparison {
   rows: ComparisonRow[];
   unmapped: UnmappedOffer[];
+  ignored: IgnoredOffer[];
   /**
    * How many subscriptions were looked at. The misconfiguration detector: rows all zero against a
    * healthy `examined` means the rulebook's offer names are stale, not that the account is empty.
    */
   examined: number;
+  /** Plan names a code-keyed rulebook could not resolve — no catalogue, or the catalogue does not know them. */
+  catalogMisses: string[];
 }
 
 export interface CompareRecurringInput {
@@ -130,10 +160,30 @@ export interface CompareRecurringInput {
   /** Any object whose `counts` paths end in numbers. */
   inventory: unknown;
   rules: readonly RecurringRule[];
-  baselines?: readonly BaselineEntry[];
+  baselines?: readonly GroupBaseline[];
+  /** Items behind a dimension path, or undefined when that dimension has none. Injected so this library knows nothing NetSapiens-shaped. */
+  itemsFor?: (path: string) => ReadonlyArray<{ key: string }> | undefined;
+  /** Names an item to a person; defaults to its key. */
+  itemLabel?: (item: { key: string }) => string;
+  /** Needed only by `planCode` / `productCode` rules — a name-keyed rulebook never touches it. */
+  catalog?: CatalogIndex;
   /** Injectable so behaviour at a window boundary is testable without touching the clock. */
   now?: Date;
 }
+
+/**
+ * How a rule is named in a report. Follows the match precedence, so the key a reader sees is the key
+ * that would have won.
+ */
+export function ruleKeyOf(rule: RecurringRule): string {
+  if (rule.planCode) return `planCode:${rule.planCode.trim()}`;
+  if (rule.offer) return `offer:${rule.offer.trim()}`;
+  if (rule.productCode) return `productCode:${rule.productCode.trim()}`;
+  return `group:${(rule.group ?? '').trim()}`;
+}
+
+const pathsOf = (rule: RecurringRule): string[] => (Array.isArray(rule.counts) ? rule.counts : rule.counts ? [rule.counts] : []);
+const groupNameOf = (rule: RecurringRule): string => (rule.group ?? rule.offer ?? rule.planCode ?? rule.productCode ?? '').trim();
 
 const norm = (v: unknown): string => (typeof v === 'string' ? v.trim().toLowerCase() : '');
 
@@ -185,83 +235,135 @@ function numberAt(root: unknown, path: string): number | undefined {
 
 export function compareRecurring(input: CompareRecurringInput): RecurringComparison {
   const now = (input.now ?? new Date()).getTime();
-  const byOffer = new Map<string, RecurringRule>();
+  const byOffer = new Map<string, RecurringRule>(), byPlan = new Map<string, RecurringRule>(), byProduct = new Map<string, RecurringRule>();
   for (const r of input.rules) {
-    const key = norm(r.offer);
-    if (key !== '' && !byOffer.has(key)) byOffer.set(key, r);
+    if (r.offer && !byOffer.has(norm(r.offer))) byOffer.set(norm(r.offer), r);
+    if (r.planCode && !byPlan.has(norm(r.planCode))) byPlan.set(norm(r.planCode), r);
+    if (r.productCode && !byProduct.has(norm(r.productCode))) byProduct.set(norm(r.productCode), r);
   }
+  // Only a rulebook that keys by code can suffer a catalogue miss; a name-keyed one never looks.
+  const usesCodes = byPlan.size > 0 || byProduct.size > 0;
 
   // Groups, in rulebook order — a row exists for every rule group whether or not anything matched,
   // because a line that vanished from the bill is exactly what this is for.
-  const groups = new Map<string, { dimension: string; billed: number; offers: ComparisonRow['offers'] }>();
-  const groupNameOf = (rule: RecurringRule): string => (rule.group ?? rule.offer).trim();
+  interface G { dimensions: string[]; billed: number; offers: ComparisonRow['offers'] }
+  const groups = new Map<string, G>();
   for (const r of input.rules) {
+    if (r.ignore) continue;
     const g = groupNameOf(r);
-    // First rule wins the dimension. Two rules in one group naming different paths is a rulebook
-    // mistake; picking one deterministically and letting the row's `dimension` show which is more
-    // useful to whoever has to fix it than an error that hides every other group.
-    if (!groups.has(g)) groups.set(g, { dimension: r.counts, billed: 0, offers: [] });
+    if (!g) continue;
+    // First rule wins the dimensions. Two rules in one group naming different paths is a rulebook
+    // mistake; picking one deterministically and showing it on the row is more useful to whoever has
+    // to fix it than an error that hides every other group.
+    if (!groups.has(g)) groups.set(g, { dimensions: pathsOf(r), billed: 0, offers: [] });
   }
-  /** Every group whose dimension is `path` — where an `alsoCounts` contribution lands. */
-  const groupsForDimension = (path: string): string[] => {
+  /** Where an `alsoCounts` credit lands: every group tracking that path, or the group of that name. */
+  const creditTargets = (key: string): string[] => {
     const out: string[] = [];
-    for (const [name, g] of groups) if (g.dimension === path) out.push(name);
+    for (const [name, g] of groups) if (name === key || g.dimensions.includes(key)) out.push(name);
     return out;
   };
 
-  const unmapped: UnmappedOffer[] = [];
+  const unmapped: UnmappedOffer[] = [], ignored: IgnoredOffer[] = [], misses = new Set<string>();
   let examined = 0;
-
   for (const sub of input.subscriptions) {
     examined++;
     for (const offer of sub.subscriptionOffer ?? []) {
       if (!isRecurring(offer) || !isActive(sub, offer, now)) continue;
       const name = typeof offer.name === 'string' ? offer.name.trim() : '';
-      const rule = byOffer.get(norm(name));
       const quantity = quantityOf(offer);
+      // Precedence: plan code, then name, then product code. Codes come from the catalogue, never the
+      // line — a subscription record carries the plan name and nothing else.
+      const entry = catalogLookup(input.catalog, name);
+      const rule = (entry && entry.planCode ? byPlan.get(norm(entry.planCode)) : undefined)
+        ?? byOffer.get(norm(name))
+        ?? (entry ? byProduct.get(norm(entry.productCode)) : undefined);
       if (!rule) {
+        if (usesCodes && !entry) misses.add(name);
         unmapped.push({ name, quantity, ...(sub.subscriptionId === undefined ? {} : { subscriptionId: sub.subscriptionId }), status: offer.status });
         continue;
       }
+      if (rule.ignore) { ignored.push({ name, quantity, rule: ruleKeyOf(rule) }); continue; }
       const perUnit = typeof rule.perUnit === 'number' && Number.isFinite(rule.perUnit) && rule.perUnit > 0 ? rule.perUnit : 1;
       const own = groups.get(groupNameOf(rule))!;
       own.billed += quantity * perUnit;
       own.offers.push({ name, quantity, perUnit, status: offer.status });
-
-      for (const [path, per] of Object.entries(rule.alsoCounts ?? {})) {
-        // Every group tracking this dimension gets the contribution — not just the first one found,
-        // and not a group invented for the path. A contribution to a dimension no group tracks is
-        // dropped: a row nobody configured would appear with a billed count and no way to read it.
-        for (const target of groupsForDimension(path)) {
-          groups.get(target)!.billed += quantity * (Number.isFinite(per) ? per : 0);
-        }
+      for (const [key, per] of Object.entries(rule.alsoCounts ?? {})) {
+        for (const target of creditTargets(key)) groups.get(target)!.billed += quantity * (Number.isFinite(per) ? per : 0);
       }
     }
   }
 
   const baselineFor = new Map((input.baselines ?? []).map((b) => [b.group, b]));
+  const label = input.itemLabel ?? ((i: { key: string }) => i.key);
 
   const rows: ComparisonRow[] = [...groups].map(([group, g]) => {
-    const found = numberAt(input.inventory, g.dimension);
-    const observed = found ?? 0;
-    const baseline = baselineFor.get(group);
+    let observed = 0, missing = false;
+    for (const p of g.dimensions) { const n = numberAt(input.inventory, p); if (n === undefined) missing = true; else observed += n; }
+
+    // Items: the union over dimensions, deduplicated by key, in first-seen order. undefined only when
+    // NO dimension has a list.
+    let present: { key: string }[] | undefined;
+    if (input.itemsFor) {
+      const seen = new Map<string, { key: string }>();
+      let any = false;
+      for (const p of g.dimensions) {
+        const list = input.itemsFor(p);
+        if (!list) continue;
+        any = true;
+        for (const it of list) if (!seen.has(it.key)) seen.set(it.key, it);
+      }
+      if (any) present = [...seen.values()];
+    }
+
+    const b = baselineFor.get(group);
+    const accepted = new Map((b?.items ?? []).map((a) => [a.key, a]));
+    let items: ComparisonItem[] | undefined, unreviewed = 0, stale = 0;
+    if (present) {
+      items = present.map((it) => {
+        const a = accepted.get(it.key);
+        if (!a) unreviewed++;
+        return { key: it.key, label: label(it), status: a ? 'accepted' : 'unreviewed', ...(a ? { acceptance: a } : {}) } as ComparisonItem;
+      });
+      const presentKeys = new Set(present.map((p) => p.key));
+      for (const a of accepted.values()) if (!presentKeys.has(a.key)) { stale++; items.push({ key: a.key, label: a.label, status: 'stale', acceptance: a }); }
+      // With a list, observed IS the list: a count and its list disagreeing would be this module's own bug.
+      observed = present.length;
+    }
+
+    const groupRow = b?.groupRow;
     let verdict: RecurringVerdict;
-    if (observed === g.billed) verdict = 'match';
-    else if (baseline === undefined) verdict = 'unbaselined';
-    else if (observed === baseline.accepted) verdict = 'accepted';
-    else verdict = 'drift';
+    if (observed === g.billed) {
+      // Stale acceptances are still listed for housekeeping, but they do not make a matched row shout.
+      verdict = 'match';
+    } else if (items && observed > g.billed) {
+      // Over-observed with a list is the case items exist for: the extras are nameable.
+      if (unreviewed === 0 && groupRow && groupRow.billed === g.billed) verdict = 'accepted';
+      else if (groupRow) verdict = 'drift';
+      else verdict = 'unbaselined';
+    } else {
+      // Shortfall, or a dimension with no items: there is no item to point at for a seat that does not
+      // exist, so the group row carries the judgement exactly as the count model did.
+      if (!groupRow) verdict = 'unbaselined';
+      else if (groupRow.accepted === observed && groupRow.billed === g.billed) verdict = 'accepted';
+      else verdict = 'drift';
+    }
 
     return {
       group,
-      dimension: g.dimension,
+      dimension: g.dimensions[0] ?? '',
+      dimensions: g.dimensions,
       billed: g.billed,
       observed,
-      ...(found === undefined ? { observedMissing: true } : {}),
-      ...(baseline === undefined ? {} : { accepted: baseline.accepted, baseline }),
+      ...(missing ? { observedMissing: true } : {}),
       verdict,
+      ...(items ? { items } : {}),
+      unreviewed,
+      stale,
+      ...(groupRow ? { groupRow } : {}),
       offers: g.offers,
     };
   });
 
-  return { rows, unmapped, examined };
+  return { rows, unmapped, ignored, examined, catalogMisses: [...misses] };
 }

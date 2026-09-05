@@ -184,9 +184,14 @@ export {
 // Recurring-subscription reconciliation. Pure functions over records — fetches nothing, writes nothing.
 export {
   compareRecurring,
-  type BaselineEntry,
+  ruleKeyOf,
+  type ComparisonItem,
   type ComparisonRow,
   type CompareRecurringInput,
+  type GroupAcceptance,
+  type GroupBaseline,
+  type IgnoredOffer,
+  type ItemAcceptance,
   type RecurringComparison,
   type RecurringRule,
   type RecurringVerdict,

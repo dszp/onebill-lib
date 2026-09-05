@@ -7,6 +7,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-04
+
 ### Added
 
 - **`listProducts()`** and **`getProduct(code)`** on `OneBillReadClient` — the product catalogue.
@@ -15,6 +17,49 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which surfaces as `OneBillApiError`) and returns the record's `pricePlanInfos`.
 - **`buildCatalogIndex(products)`** and **`catalogLookup(index, planName)`** in `catalog.ts` — a pure
   index joining a price plan's name (all a subscription line carries) to its plan and product codes.
+- **`ruleKeyOf(rule)`** — how a rule is named in a report (`offer:…`, `planCode:…`, `productCode:…`,
+  `group:…`), following the same precedence the matcher uses.
+
+### Changed
+
+- **BREAKING — `compareRecurring` accepts per ITEM, not per count.** A count says twelve extensions
+  exist against ten billed; it cannot say *which* two are the extra ones, so it cannot tell "the same
+  two we already looked at" from "one of those was deleted and a different one appeared". Where the
+  caller can supply the list behind a dimension — the new injected `itemsFor(path)`, with
+  `itemLabel(item)` to name one — the row carries a `ComparisonItem` per thing, an operator accepts
+  individual items, and a swap that leaves the count unchanged reads `drift` instead of staying
+  quietly `accepted`.
+
+  - `baselines` takes **`GroupBaseline[]`** (`{ group, items: ItemAcceptance[], groupRow?: GroupAcceptance }`)
+    instead of `BaselineEntry[]`. **`BaselineEntry` is removed**, and with it the row's `accepted` and
+    `baseline` fields; the whole-group decision is now `ComparisonRow.groupRow`.
+  - Rows gain **`items`** (undefined when no dimension of the row has a list), **`unreviewed`**,
+    **`stale`**, **`groupRow`** and **`dimensions`**. `dimension` remains, as the first of `dimensions`.
+  - Rules gain **`planCode`** and **`productCode`** keys, resolved through a `CatalogIndex` passed as
+    `catalog` — a subscription line carries the plan NAME and nothing else, so the codes have to come
+    from the catalogue. Precedence when more than one rule matches: `planCode`, then `offer`, then
+    `productCode`, so a product rule means "any plan under this product I have not named".
+  - Rules gain **`ignore: true`** for a line that is known and deliberately not compared. It leaves
+    `unmapped`, lands in the new **`ignored`** list with the rule key that matched, and makes no row.
+  - `counts` accepts an **array** of paths: observed is the sum and the item list the union.
+  - A rule with **no key at all** is a comparison-only row — a group whose billed comes entirely from
+    other rules' `alsoCounts` credits. `alsoCounts` keys may now name a GROUP as well as a path.
+  - The result gains **`catalogMisses`**: plan names a code-keyed rulebook could not resolve, either
+    because no catalogue was passed or because the catalogue does not know them. A rulebook keyed only
+    by name never reports one.
+
+  Verdicts, with `B` = billed, `n` = present items and `G` = the group row: `match` when `n == B`
+  (stale acceptances are listed for housekeeping but do not change it). Over-observed, `accepted` when
+  every present item is accepted and `G.billed == B`, `drift` when `G` exists and either an unreviewed
+  item appeared or `B` moved, `unbaselined` otherwise. On a shortfall — and for a dimension with no
+  item list, in either direction — the group row carries the judgement as the count model did:
+  `accepted` when `G.accepted == n && G.billed == B`, `drift` when `G` exists and either differs,
+  `unbaselined` without one.
+
+### Fixed
+
+- **`package.json` carried two `//files` doc keys**, the second silently overriding the first — and
+  the first claimed the globs exclude maps, which they no longer do. The stale one is gone.
 
 ## [0.4.0] — 2026-09-03
 

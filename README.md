@@ -374,17 +374,72 @@ const rules: RecurringRule[] = [
 const inventory = { extensions: { total: 12 }, dids: { total: 14 }, e911Addresses: 1 };
 
 const out = compareRecurring({ subscriptions, inventory, rules });
-// out.rows     - one per group: { group, dimension, billed, observed, verdict, offers }
-// out.unmapped - active recurring offers no rule accounts for
+// out.rows          - one per group: { group, dimensions, billed, observed, verdict, items, offers }
+// out.unmapped      - active recurring offers no rule accounts for
+// out.ignored       - offers an `ignore` rule deliberately excludes
+// out.catalogMisses - plan names a code-keyed rulebook could not resolve
 ```
 
 `inventory` is any object whose `counts` paths end in a number, so this works over whatever you
-count — extensions, mailboxes, licences, doors.
+count — extensions, mailboxes, licences, doors. `counts` also takes an array of paths: observed is
+their sum, and the item list their union.
 
-**Verdicts.** `match` when observed equals billed. Pass `baselines` — what an operator previously
-declared correct for a group — and a difference becomes `accepted` while it holds and `drift` once
-observed moves away from it. Without a baseline, a difference is `unbaselined`: nobody has said yet
-whether it is normal.
+### Accept individual items, not a count
+
+A count says twelve extensions exist against ten billed. It cannot say *which* two are the extra ones,
+so it cannot tell "the same two we already looked at" from "one of those was deleted and a different
+one appeared". Pass **`itemsFor(path)`** — the list of things behind a dimension, or `undefined` where
+that dimension has none — and every row carries one entry per item, each `accepted`, `unreviewed` or
+`stale`. `itemLabel(item)` names one to a person; it defaults to the key.
+
+```ts
+const out = compareRecurring({
+  subscriptions, inventory, rules,
+  itemsFor: (path) => (path === 'extensions.total' ? extensions : undefined),
+  itemLabel: (e) => e.label,
+  baselines,   // GroupBaseline[]: { group, items: ItemAcceptance[], groupRow?: GroupAcceptance }
+});
+```
+
+Where a dimension has an item list, `observed` **is** the length of that list. The item list arrives
+injected: this library never learns what an extension or a phone number is, only that a dimension may
+have keys behind it and that keys can be accepted.
+
+**Verdicts.** With `B` = billed, `n` = the present items and `G` = the group row:
+
+- `match` when `n == B`. Stale acceptances are still listed for housekeeping but do not change it.
+- Over-observed (`n > B`) — the case items exist for: `accepted` when every present item is accepted
+  and `G.billed == B`; `drift` when `G` exists and either an unreviewed item has appeared or `B` has
+  moved since the decision; `unbaselined` otherwise, with `unreviewed` saying how many remain.
+- Shortfall (`n < B`): there is no item to point at for a seat that does not exist, so the group row
+  carries the judgement. `accepted` when `G.accepted == n && G.billed == B`, `drift` when `G` exists
+  and either differs, `unbaselined` when there is no `G`.
+- A dimension with **no** item list uses the shortfall rules in both directions — the count model,
+  kept for the one place items do not exist. Such a row has `items: undefined` and `unreviewed: 0`.
+
+### Rule keys and precedence
+
+A subscription line carries the price plan's **name** and nothing else — no plan code, no product
+code. So `offer` matches the name, while `planCode` and `productCode` resolve through a
+`CatalogIndex` you pass as `catalog` (see [Catalogue](#catalogue) under Reading). When more
+than one rule matches a line the precedence is **`planCode`, then `offer`, then `productCode`** — a
+product rule therefore means "any plan under this product I have not named", and a named plan always
+wins. A rulebook keyed only by `offer` never touches the index; one keyed by code reports every plan
+name it could not resolve in `catalogMisses` rather than silently leaving the line unmatched.
+
+Two more rule forms:
+
+```ts
+{ productCode: 'FAX', ignore: true }             // known, deliberately not compared
+{ group: 'callcenter', counts: [                 // comparison-only: billed comes from credits alone
+  'extensions.byScope.Agent', 'extensions.byScope.Supervisor',
+] }
+```
+
+An `ignore` rule keeps the line out of `unmapped`, puts it in `ignored` with the rule key that matched
+(`ruleKeyOf` renders those), and creates no row. A rule with no key at all defines a group whose
+`billed` comes entirely from other rules' `alsoCounts` credits — whose keys may name a **group** as
+well as a dotted path.
 
 Only offers carrying a `REC` charge and inside their activation window are counted; `ONE_TIME` and
 `USAGE` are ignored, and `USAGE` has its own reconciler above. Activity is the window intersection of
