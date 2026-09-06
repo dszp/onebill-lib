@@ -36,4 +36,13 @@ describe('buildCatalogIndex', () => {
     expect(catalogLookup(undefined, 'Standard Seat')).toBeUndefined();
     expect(catalogLookup(buildCatalogIndex(products), '  standard SEAT ')!.planCode).toBe('STD24');
   });
+  it('catalogLookup tolerates dash, non-breaking-space and zero-width variants of a stored name', () => {
+    const ix = buildCatalogIndex(products);
+    // Stored as "Bundled Seat - 24M" (hyphen); looked up with an en dash.
+    expect(catalogLookup(ix, 'Bundled Seat – 24M')!.planCode).toBe('');
+    // Non-breaking space in place of the ordinary one.
+    expect(catalogLookup(ix, 'Standard Seat')!.planCode).toBe('STD24');
+    // A trailing zero-width space, the kind a paste from OneBill's UI leaves behind.
+    expect(catalogLookup(ix, 'Standard Seat​')!.planCode).toBe('STD24');
+  });
 });

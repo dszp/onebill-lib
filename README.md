@@ -65,10 +65,10 @@ catalogLookup(catalog, offer.name);                             // -> { planName
 
 A subscription line names only its price plan (`subscriptionOffer[].name`) — no plan code, no product
 code. `listProducts` names every product but not its plans; `getProduct(code)` returns one product's
-`pricePlanInfos`. `buildCatalogIndex` joins the two, keyed by the plan's name (trimmed and lowercased),
-so a rule can key on a plan or product code and still match a line by the only thing it says about
-itself. A plan with an empty code — a retail plan supplied by a reseller's upstream — is kept under
-its name with `planCode: ''`.
+`pricePlanInfos`. `buildCatalogIndex` joins the two, keyed by the plan's normalised name — case,
+whitespace and dash variants are ignored — so a rule can key on a plan or product code and still
+match a line by the only thing it says about itself. A plan with an empty code — a retail plan
+supplied by a reseller's upstream — is kept under its name with `planCode: ''`.
 
 ## Orders and quotes
 
@@ -440,11 +440,11 @@ injected: this library never learns what an extension or a phone number is, only
 have keys behind it and that keys can be accepted.
 
 **Billed as.** An acceptance may record which offer the item is billed as — `ItemAcceptance.offer`, a
-name from the row's `offers[].name`, matched case-insensitively after trim. Each offer entry then
-carries `tagged` (present accepted items billed as it; a stale acceptance counts toward nothing) and
-the row carries `untagged` for accepted items naming none. Tags never enter the verdict: nine seats
-tagged to a tier billing eight is something to show a reader — "Seat Tier One x8 — 9 tagged" — not a
-discrepancy this library can adjudicate.
+name from the row's `offers[].name`, matched with case, whitespace and dash variants ignored. Each
+offer entry then carries `tagged` (present accepted items billed as it; a stale acceptance counts
+toward nothing) and the row carries `untagged` for accepted items naming none. Tags never enter the
+verdict: nine seats tagged to a tier billing eight is something to show a reader — "Seat Tier One x8
+— 9 tagged" — not a discrepancy this library can adjudicate.
 
 **Verdicts.** With `B` = billed, `C` = `B + entitled` (so `C == B` unless something entitles the row),
 `n` = the present items and `G` = the group row. A **stale** acceptance — accepted once, no longer

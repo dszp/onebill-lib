@@ -7,6 +7,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-09-06
+
+### Fixed
+
+- **Name matching now tolerates dash, whitespace and invisible-character variants.** Offer/plan/product
+  names typed into OneBill's UI are inconsistent Unicode for the same words: an en dash or em dash
+  where a hyphen was meant, a non-breaking hyphen or space, doubled spaces, or a pasted-in zero-width
+  space — a plain `.trim().toLowerCase()` treated each of these as a different name, so a rulebook rule
+  could silently fail to match the live subscription line it was written for (confirmed from a live
+  offer name ending in a zero-width space, U+200B). All name comparisons in `recurring.ts` — rule
+  matching (`offer`/`planCode`/`productCode`), `creditTargets` by group name, `credits[].from`
+  aggregation, and billed-as `offers[].tagged` matching — and the catalogue's plan-name lookup in
+  `catalog.ts` now go through one new exported `normalizeName()` (in `src/names.ts`): NFKC, then dash
+  variants (hyphen, en/em dash, non-breaking hyphen, minus sign) collapse to `-`, whitespace runs
+  (including non-breaking space) collapse to one space, then trim and lower-case — with zero-width and
+  other invisible format characters (`\p{Cf}`: zero-width space/joiners, word joiner, BOM) stripped
+  first. Display strings are never normalised, only the comparison key.
+
 ## [0.6.0] — 2026-09-05
 
 ### Added

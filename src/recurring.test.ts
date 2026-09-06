@@ -406,6 +406,27 @@ describe('compareRecurring v2', () => {
     expect(rowFor(out, 'seats').billed).toBe(12);
   });
 
+  it('matches an offer name across dash, whitespace and zero-width variants (normalizeName)', () => {
+    const faxRule: RecurringRule[] = [
+      { offer: 'Native Fax - Analog (requires MP202B Fax ATA)', counts: 'devices.total', group: 'fax' },
+    ];
+    // En dash and a doubled space — the way OneBill's UI renders the identical words.
+    const enDash = compareRecurring({ ...base, rules: faxRule, subscriptions: [rec('Native Fax – Analog  (requires MP202B Fax ATA)', '1')] });
+    expect(rowFor(enDash, 'fax').billed).toBe(1);
+
+    // Em dash on the bill, a plain hyphen in the rule.
+    const emDash = compareRecurring({ ...base, rules: faxRule, subscriptions: [rec('Native Fax — Analog (requires MP202B Fax ATA)', '1')] });
+    expect(rowFor(emDash, 'fax').billed).toBe(1);
+
+    // A non-breaking space in place of an ordinary one.
+    const nbsp = compareRecurring({ ...base, rules: faxRule, subscriptions: [rec('Native Fax - Analog (requires MP202B Fax ATA)', '1')] });
+    expect(rowFor(nbsp, 'fax').billed).toBe(1);
+
+    // A trailing zero-width space — the artifact a paste from OneBill's UI leaves behind.
+    const zeroWidth = compareRecurring({ ...base, rules: faxRule, subscriptions: [rec('Native Fax - Analog (requires MP202B Fax ATA)​', '1')] });
+    expect(rowFor(zeroWidth, 'fax').billed).toBe(1);
+  });
+
   it('defaults the group to the offer name', () => {
     const out = compareRecurring({ ...base, subscriptions: [rec('Transcription Add-on', '5')] });
     expect(rowFor(out, 'Transcription Add-on').observed).toBe(5);
@@ -766,6 +787,20 @@ describe('compareRecurring entitlements (v2.1)', () => {
     expect(row.credits).toEqual([{ from: 'Premium Hosted Phone Seat', kind: 'entitles', quantity: 3 }]);
   });
 
+  it('aggregates credit provenance across a dash-variant spelling — a hyphen on the rule, an en dash on the line', () => {
+    const hyphenPremium: RecurringRule = { offer: 'Premium-Hosted Phone Seat', counts: 'extensions.total', group: 'seats', entitles: { smsNumbers: 1 } };
+    const out = compareRecurring({
+      ...base,
+      rules: [hyphenPremium],
+      subscriptions: [rec('Premium-Hosted Phone Seat', '1'), rec('Premium–Hosted Phone Seat', '2')],
+      inventory: live({ smsNumbers: 3 }),
+    });
+    const row = rowFor(out, 'smsNumbers');
+    expect(row.entitled).toBe(3);
+    // One entry, not two: the en-dash spelling reads as the same offer, not a second product crediting the row.
+    expect(row.credits).toEqual([{ from: 'Premium-Hosted Phone Seat', kind: 'entitles', quantity: 3 }]);
+  });
+
   it('leaves entitled, credits and optional at their empty values on an ordinary row', () => {
     const out = compareRecurring({ ...base, subscriptions: [rec('Seat Tier One', '12')] });
     const row = rowFor(out, 'seats');
@@ -830,6 +865,25 @@ describe('compareRecurring billed-as tags', () => {
     const baselines: GroupBaseline[] = [{ group: 'seats', items: [tag(ext(100), 'Seat Tier One'), tag(ext(101), 'Seat Tier One'), tag(ext(102), '  seat TIER two  ')] }];
     const out = compareRecurring({ ...tiers, baselines });
     expect(namesAndTags(out)).toEqual([{ name: 'Seat Tier One', tagged: 2 }, { name: 'Seat Tier Two', tagged: 1 }]);
+    expect(rowFor(out, 'seats').untagged).toBe(0);
+  });
+
+  it('matches a billed-as tag stored with an en dash against an offer name that reads with a hyphen', () => {
+    const dashRules: RecurringRule[] = [
+      { offer: 'Seat Tier One', counts: 'extensions.total', group: 'seats' },
+      { offer: 'Fax-Enabled Seat', counts: 'extensions.total', group: 'seats' },
+    ];
+    const twoSeats = [ext(100), ext(101)].map((key) => ({ key }));
+    const dashTiers = {
+      ...base,
+      rules: dashRules,
+      itemsFor: (p: string) => (p === 'extensions.total' ? twoSeats : items[p]),
+      subscriptions: [rec('Seat Tier One', '1'), rec('Fax-Enabled Seat', '1')],
+    };
+    // The offer name on the bill has a hyphen; the tag recorded on the acceptance has an en dash.
+    const baselines: GroupBaseline[] = [{ group: 'seats', items: [tag(ext(100), 'Seat Tier One'), tag(ext(101), 'Fax–Enabled Seat')] }];
+    const out = compareRecurring({ ...dashTiers, baselines });
+    expect(namesAndTags(out)).toEqual([{ name: 'Seat Tier One', tagged: 1 }, { name: 'Fax-Enabled Seat', tagged: 1 }]);
     expect(rowFor(out, 'seats').untagged).toBe(0);
   });
 

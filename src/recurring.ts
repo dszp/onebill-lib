@@ -59,6 +59,7 @@
  * carried through on the row's offer list for a caller that wants to show it.
  */
 import { catalogLookup, type CatalogIndex } from './catalog.js';
+import { normalizeName } from './names.js';
 import type { Subscription, SubscriptionOffer } from './model.js';
 
 /**
@@ -111,8 +112,8 @@ export interface ItemAcceptance {
   label: string;
   /**
    * Which offer this item is billed as — a name from the row's `offers[].name`, matched the way offer
-   * names are matched everywhere else: case-insensitively after trim. Absent means untagged, which
-   * every acceptance recorded before 0.6.0 is.
+   * names are matched everywhere else: via `normalizeName` (case, whitespace and dash variants
+   * ignored). Absent means untagged, which every acceptance recorded before 0.6.0 is.
    *
    * It is a note on the decision, never an input to it: the verdict compares counts, and an operator
    * who tags nine seats to a tier that bills eight has recorded something for a reader to act on, not
@@ -299,8 +300,6 @@ export function ruleKeyOf(rule: RecurringRule): string {
 const pathsOf = (rule: RecurringRule): string[] => (Array.isArray(rule.counts) ? rule.counts : rule.counts ? [rule.counts] : []);
 const groupNameOf = (rule: RecurringRule): string => (rule.group ?? rule.offer ?? rule.planCode ?? rule.productCode ?? '').trim();
 
-const norm = (v: unknown): string => (typeof v === 'string' ? v.trim().toLowerCase() : '');
-
 /** Parse an API date, or `undefined` if absent or unparseable. */
 function parseDate(value: unknown): number | undefined {
   if (typeof value !== 'string' || value === '') return undefined;
@@ -323,9 +322,11 @@ function quantityOf(offer: SubscriptionOffer): number {
   return Number.isFinite(n) && n >= 0 ? n : 1;
 }
 
-/** Does this offer carry a recurring charge? An offer with no charges at all is not one. */
+/** Does this offer carry a recurring charge? An offer with no charges at all is not one. This is an
+ *  API enum value, not a human-typed name, so it stays on a plain trim/lower-case rather than the
+ *  dash/whitespace-tolerant `normalizeName` — "REC" has no typo variants to tolerate. */
 function isRecurring(offer: SubscriptionOffer): boolean {
-  return (offer.subscriptionCharge ?? []).some((c) => norm(c?.type) === 'rec');
+  return (offer.subscriptionCharge ?? []).some((c) => (typeof c?.type === 'string' ? c.type.trim().toLowerCase() : '') === 'rec');
 }
 
 /** Active by the intersected activation window — see the note at the top of this file. */
@@ -373,9 +374,9 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
   const now = (input.now ?? new Date()).getTime();
   const byOffer = new Map<string, RecurringRule>(), byPlan = new Map<string, RecurringRule>(), byProduct = new Map<string, RecurringRule>();
   for (const r of input.rules) {
-    if (r.offer && !byOffer.has(norm(r.offer))) byOffer.set(norm(r.offer), r);
-    if (r.planCode && !byPlan.has(norm(r.planCode))) byPlan.set(norm(r.planCode), r);
-    if (r.productCode && !byProduct.has(norm(r.productCode))) byProduct.set(norm(r.productCode), r);
+    if (r.offer && !byOffer.has(normalizeName(r.offer))) byOffer.set(normalizeName(r.offer), r);
+    if (r.planCode && !byPlan.has(normalizeName(r.planCode))) byPlan.set(normalizeName(r.planCode), r);
+    if (r.productCode && !byProduct.has(normalizeName(r.productCode))) byProduct.set(normalizeName(r.productCode), r);
   }
   // Only a rulebook that keys by code can suffer a catalogue miss; a name-keyed one never looks.
   const usesCodes = byPlan.size > 0 || byProduct.size > 0;
@@ -394,10 +395,13 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
     // to fix it than an error that hides every other group.
     if (!groups.has(g)) groups.set(g, emptyGroup(pathsOf(r)));
   }
-  /** Where a credit lands: every group tracking that path, or the group of that name. */
+  /** Where a credit lands: every group tracking that path, or the group of that name — matched the
+   *  same tolerant way as every other name here, since a group's name may itself be an offer name
+   *  (a rule with no key of its own defaults its group to `rule.offer`). */
   const creditTargets = (key: string): string[] => {
+    const nkey = normalizeName(key);
     const out: string[] = [];
-    for (const [name, g] of groups) if (name === key || g.dimensions.includes(key)) out.push(name);
+    for (const [name, g] of groups) if (normalizeName(name) === nkey || g.dimensions.some((d) => normalizeName(d) === nkey)) out.push(name);
     return out;
   };
   // A credit naming a path or group no rule tracks gets a comparison-only row of its own, named after
@@ -413,14 +417,14 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
   }
   /**
    * Credit one group, keeping the provenance a reader needs to see why a row is billed at all. Lines
-   * are aggregated by name the way they are MATCHED — case-insensitively after trim — so two spellings
-   * of one plan do not read as two products crediting the row. The first spelling seen is displayed,
-   * since that is the one the reader will find on the bill.
+   * are aggregated by name the way they are MATCHED — via `normalizeName` — so two spellings of one
+   * plan (a hyphen here, an en dash typed there) do not read as two products crediting the row. The
+   * first spelling seen is displayed, since that is the one the reader will find on the bill.
    */
   const credit = (target: string, from: string, kind: ComparisonCredit['kind'], amount: number): void => {
     const g = groups.get(target)!;
     if (kind === 'entitles') g.entitled += amount; else g.billed += amount;
-    const at = `${kind}\u0000${norm(from)}`;
+    const at = `${kind}\u0000${normalizeName(from)}`;
     const seen = g.credits.get(at);
     if (seen) seen.quantity += amount;
     else g.credits.set(at, { from, kind, quantity: amount });
@@ -437,9 +441,9 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
       // Precedence: plan code, then name, then product code. Codes come from the catalogue, never the
       // line — a subscription record carries the plan name and nothing else.
       const entry = catalogLookup(input.catalog, name);
-      const rule = (entry && entry.planCode ? byPlan.get(norm(entry.planCode)) : undefined)
-        ?? byOffer.get(norm(name))
-        ?? (entry ? byProduct.get(norm(entry.productCode)) : undefined);
+      const rule = (entry && entry.planCode ? byPlan.get(normalizeName(entry.planCode)) : undefined)
+        ?? byOffer.get(normalizeName(name))
+        ?? (entry ? byProduct.get(normalizeName(entry.productCode)) : undefined);
       if (!rule) {
         if (usesCodes && !entry) misses.add(name);
         unmapped.push({ name, quantity, ...(sub.subscriptionId === undefined ? {} : { subscriptionId: sub.subscriptionId }), status: offer.status });
@@ -502,7 +506,7 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
     const taggedTo = new Map<string, number>();
     for (const it of items ?? []) {
       if (it.status !== 'accepted') continue;
-      const tag = norm(it.acceptance?.offer);
+      const tag = normalizeName(it.acceptance?.offer ?? '');
       if (!tag) untagged++;
       else taggedTo.set(tag, (taggedTo.get(tag) ?? 0) + 1);
     }
@@ -556,7 +560,7 @@ export function compareRecurring(input: CompareRecurringInput): RecurringCompari
       untagged,
       stale,
       ...(groupRow ? { groupRow } : {}),
-      offers: g.offers.map((o) => ({ ...o, tagged: taggedTo.get(norm(o.name)) ?? 0 })),
+      offers: g.offers.map((o) => ({ ...o, tagged: taggedTo.get(normalizeName(o.name)) ?? 0 })),
       credits: [...g.credits.values()],
       optional: g.billed === 0 && g.entitled > 0,
     };

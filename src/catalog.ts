@@ -10,17 +10,18 @@
  * A plan can have an EMPTY code (retail plans supplied by a reseller's upstream do). It is kept under
  * its name with `planCode: ''` so a product-code key can still reach it; a plan-code key never will.
  */
+import { normalizeName } from './names.js';
 import type { Product } from './model.js';
 
 export interface CatalogEntry { planName: string; planCode: string; productCode: string; productName: string }
 export interface CatalogIndex {
-  /** Keyed by the normalised plan name: trimmed, lowercased. */
+  /** Keyed by `normalizeName(planName)` — case, whitespace and dash variants ignored, since that is
+   *  how a subscription line's name is looked up here. */
   byPlanName: Record<string, CatalogEntry>;
   products: number;
   plans: number;
 }
 
-const norm = (v: unknown): string => (typeof v === 'string' ? v.trim().toLowerCase() : '');
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 
 /** Pure. First product wins a duplicated plan name; the index is deterministic in input order. */
@@ -32,7 +33,7 @@ export function buildCatalogIndex(products: readonly Product[]): CatalogIndex {
       const planName = str(plan.name);
       if (!planName) continue;
       plans++;
-      const key = norm(planName);
+      const key = normalizeName(planName);
       if (byPlanName[key]) continue;
       byPlanName[key] = { planName, planCode: str(plan.code), productCode: str(p.code), productName: str(p.name) };
     }
@@ -41,5 +42,5 @@ export function buildCatalogIndex(products: readonly Product[]): CatalogIndex {
 }
 
 export function catalogLookup(index: CatalogIndex | undefined, planName: string): CatalogEntry | undefined {
-  return index?.byPlanName[norm(planName)];
+  return index?.byPlanName[normalizeName(planName)];
 }
