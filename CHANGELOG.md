@@ -23,7 +23,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   variants (hyphen, en/em dash, non-breaking hyphen, minus sign) collapse to `-`, whitespace runs
   (including non-breaking space) collapse to one space, then trim and lower-case — with zero-width and
   other invisible format characters (`\p{Cf}`: zero-width space/joiners, word joiner, BOM) stripped
-  first. Display strings are never normalised, only the comparison key.
+  first. Display strings are never normalised, only the comparison key. `usage.ts`'s offer-name
+  matching (`UsageSubscriptionSpec.offerNames`) and its identifier-comparison default
+  (`ReconcileUsageOptions.normalize`) now go through the same function — the usage reconciler reads
+  offer names from the same OneBill UI and is exposed to the same corruption.
 
 ## [0.6.0] — 2026-09-05
 

@@ -43,6 +43,14 @@ describe('findUsageSubscriptions', () => {
     expect(matched[0]!.identifier).toBe('acme.12345.service');
   });
 
+  it('matches an offer name across an en dash and a trailing zero-width space (normalizeName)', () => {
+    const dashSpec = { offerNames: ['Domain-Usage'] };
+    const subs = [usageSub('acme.12345.service', {}, { name: 'Domain–Usage​' })];
+    const { matched } = findUsageSubscriptions(subs, dashSpec, { now: NOW });
+    expect(matched).toHaveLength(1);
+    expect(matched[0]!.identifier).toBe('acme.12345.service');
+  });
+
   it('returns only matches, never every identifier — this is not a lookup path', () => {
     const subs = [otherSub('SUB00001-SEAT'), usageSub('acme.12345.service'), otherSub('SUB00002-DID')];
     const { matched, examined } = findUsageSubscriptions(subs, SPEC, { now: NOW });

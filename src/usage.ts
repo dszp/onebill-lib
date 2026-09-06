@@ -33,6 +33,7 @@ import type { Link } from './link.js';
 import type { LinkConflict } from './linkIndex.js';
 import { targetKey } from './linkIndex.js';
 import type { Subscription } from './model.js';
+import { normalizeName } from './names.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Layer 1 — extract
@@ -45,7 +46,8 @@ import type { Subscription } from './model.js';
  * default: a built-in product name would bind this library to one deployment's catalogue.
  */
 export interface UsageSubscriptionSpec {
-  /** Offer names that mean "this subscription's identifier is a link target". Trimmed, case-insensitive. */
+  /** Offer names that mean "this subscription's identifier is a link target". Matched via
+   *  `normalizeName` — case, whitespace and dash variants ignored. */
   offerNames?: readonly string[];
   /** Escape hatch for anything `offerNames` cannot express. OR'd with `offerNames`. */
   match?: (sub: Subscription) => boolean;
@@ -127,7 +129,7 @@ export function findUsageSubscriptions(
   opts: { now?: Date } = {},
 ): UsageSubscriptionScan {
   const now = (opts.now ?? new Date()).getTime();
-  const wanted = new Set((spec.offerNames ?? []).map((n) => n.trim().toLowerCase()));
+  const wanted = new Set((spec.offerNames ?? []).map((n) => normalizeName(n)));
 
   const matched: UsageSubscriptionMatch[] = [];
   let examined = 0;
@@ -137,7 +139,7 @@ export function findUsageSubscriptions(
 
     const offers = sub.subscriptionOffer ?? [];
     const hit = offers.find((o) => {
-      const name = typeof o?.name === 'string' ? o.name.trim().toLowerCase() : '';
+      const name = typeof o?.name === 'string' ? normalizeName(o.name) : '';
       return name !== '' && wanted.has(name);
     });
 
@@ -251,13 +253,15 @@ export interface ReconcileUsageOptions {
   spec: UsageSubscriptionSpec;
   now?: Date;
   /**
-   * Applied to both sides before comparison. Defaults to trim + lowercase, which is right when one
-   * system preserves case and the other does not.
+   * Applied to both sides before comparison. Defaults to `normalizeName` — case, whitespace and
+   * dash variants ignored — which is right when one system preserves case and the other does not,
+   * and defends an identifier that was copy-pasted through something that mangled it the way an
+   * offer name can be.
    */
   normalize?: (value: string) => string;
 }
 
-const defaultNormalize = (value: string): string => value.trim().toLowerCase();
+const defaultNormalize = normalizeName;
 
 /**
  * Compare each account's links against its usage subscriptions.
