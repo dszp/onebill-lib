@@ -128,5 +128,14 @@ jobs:
             *-*) DIST_TAG=next ;;
             *)   DIST_TAG=latest ;;
           esac
+          # Every version on npm gets a matching GitHub Release, including one published by hand
+          # (the first publish of a new package always is). A Release for a version npm already
+          # has is therefore expected, and must succeed as a no-op rather than fail on "cannot
+          # publish over the previously published version".
+          NAME=$(node -p "require('./package.json').name")
+          if npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${NAME}@${VERSION} is already on npm; nothing to publish."
+            exit 0
+          fi
           echo "Publishing ${VERSION} under dist-tag: ${DIST_TAG}"
           npm publish --provenance --access public --tag "$DIST_TAG"
