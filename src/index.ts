@@ -54,10 +54,18 @@ export {
   type OneBillReadClientConfig,
 } from './readClient.js';
 export {
+  OneBillCatalogConflictError,
+  OneBillCatalogVerificationError,
   OneBillInactiveAccountError,
   OneBillWriteClient,
   OneBillWriteVerificationError,
+  type AddPricePlanResult,
+  type CatalogWriteOptions,
+  type CreateProductResult,
+  type NewProduct,
   type OneBillWriteClientConfig,
+  type PricePlanChanges,
+  type UpdatePricePlanResult,
   type SetExternalIdOptions,
   type SetExternalIdResult,
   type SetLinksResult,
@@ -113,6 +121,16 @@ export {
   type CatalogEntry,
   type CatalogIndex,
 } from './catalog.js';
+
+// New price plans from existing ones. Pure — strips the server's identity so the result can be sent
+// to `OneBillWriteClient.addPricePlan` / `createProduct` without naming any existing plan or charge.
+export {
+  OneBillPricePlanTemplateError,
+  findOwnIds,
+  pricePlanFromTemplate,
+  type NewPricePlan,
+  type PricePlanOverrides,
+} from './pricePlan.js';
 
 // The link codec.
 export {

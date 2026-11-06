@@ -361,3 +361,49 @@ export function fakeInvoiceDetail(
     ],
   };
 }
+
+/** A one-time hardware plan in the read shape `getProduct` returns. Fictional. */
+export const fakePricePlan = () => ({
+  id: '50001',
+  name: 'Example X100 Desk Phone',
+  code: 'EX-X100',
+  description: '<p>Example X100.</p>',
+  availableFrom: '2026-01-01T00:00:00-08:00',
+  priceplanStatus: 'ACTIVE',
+  url: 'https://billing.example.com/productpurchase?id=abc',
+  selfcarePriceplanUrl: 'https://selfcare.example.com/productpurchase?id=abc',
+  term: 0,
+  priceOverridable: true,
+  pricePlanFeatureInfos: [{ featureName: 'MAC', featureId: '203', value: '' }],
+  pricePlanImageInfos: [
+    { id: 1, image: 'AAAA', sequence: 0 },
+    { id: 2, image: 'BBBB', sequence: 0 },
+  ],
+  pricePlanEventInfos: [
+    {
+      id: '60001',
+      eventType: 'ONETIME',
+      eventName: 'PURCHASE',
+      chargeInfos: [
+        {
+          id: '70001',
+          amount: 150,
+          currencyCode: 840,
+          glCode: 'Revenue - Hardware',
+          glString: 'Hardware:Example X100 Desk Phone',
+          effectiveFrom: '2026-01-01T09:00:00-08:00',
+          localizedInvoiceDescriptions: [{ language: 'US English', description: 'Example X100 Desk Phone' }],
+          settlementPolicy: {
+            id: '900',
+            policyName: 'No commission',
+            settlementPolicyRuleArray: [
+              { id: '901', ruleName: 'Retail Price', ruleValue: 0, position: 'A1' },
+              { id: '902', ruleName: 'Wholesale Price', ruleValue: 0, position: 'P1' },
+            ],
+          },
+        },
+      ],
+    },
+  ],
+});
+
