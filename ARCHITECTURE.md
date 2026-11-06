@@ -17,6 +17,7 @@ src/
   usage.ts        Usage-subscription reconciliation. Pure — fetches nothing, writes nothing.
   recurring.ts    Recurring-subscription reconciliation against a caller-supplied rulebook. Pure.
   catalog.ts      buildCatalogIndex — plan name -> plan and product code. Pure.
+  pricePlan.ts    pricePlanFromTemplate — a new plan body from an existing plan. Pure.
   invoice.ts      Invoice detail: flatten, reconcile, compare calls, per-tax totals. Pure.
   gather.ts       The one orchestrator: reads what usage.ts needs. The only I/O outside the clients.
   index.ts        The barrel. Explicit named exports only.
@@ -425,6 +426,57 @@ actually being asked — *did any data change* — because a pure reordering is 
 character."}}` and leaves the previous value untouched. So there is no silent truncation to defend
 against — but it does mean the length rule is enforced in two places, and `formatExternalId` exists
 to fail before the round trip rather than after it.
+
+## Writing the catalogue: the product endpoint merges
+
+Measured against a live tenant on 2026-11-05, on disposable products created for the purpose and
+then deleted.
+
+**`PUT /rest/ProductService/v1/product` merges.** A body of `{ id, pricePlanInfos: [<new plan>] }`
+added the plan; the product's existing plan came back identical — same charge id, same
+`effectiveFrom`, so no charge revision — and product-level fields were unchanged. This is the
+opposite of the subscriber endpoint, so the safe write shape is the opposite too: send the minimum.
+Echoing the existing plans back would resend every field of every live charge, a shape that has not
+been tested. `addPricePlan` never does it.
+
+**A new plan must not carry the server's ids.** On this endpoint an `id` names an existing plan,
+event, charge or image. `pricePlanFromTemplate` strips them, and the write methods refuse any body
+where `findOwnIds` finds one. The ids that remain are references to shared definitions: the
+settlement policy, its rules, and a feature's `featureId`.
+
+**The API rejects some of its own read values.** A charge created in OneBill's UI can read back
+`matchingCurrency: false`, and a create that echoes it fails in-band with `10SP13112 Invalid Matching
+Currency value, allowed value is true.` The template helper sends `true`. The same pattern applies to
+`payInfo` and `contact` on the subscriber endpoint.
+
+**`availableFrom` cannot be back-dated.** `10PR1012` rejected midnight today at an offset behind the
+tenant's. Tomorrow is accepted, and stored as a date in tenant time.
+
+**Editing an existing plan merges too, and changes the charge in place.** A body of ids plus the
+changed fields — `{ id, pricePlanInfos: [{ id, name }] }`, or down to
+`pricePlanEventInfos: [{ id, chargeInfos: [{ id, amount }] }]` — set exactly those fields. The plan,
+event and charge kept their ids, the charge's `effectiveFrom` did not move, and the product's other
+plan and its own fields were unchanged. Measured for `name`, `description`, `availableTo`, `amount`,
+`cost`, `glString` and the invoice description; `updatePricePlan` offers only those. What a price
+edit does to existing subscriptions was not measured, because the disposable plan had none.
+
+The server has side effects on edit, and `updatePricePlan` doesn't count them as collateral:
+
+- A rename regenerates the plan's purchase links (`url`, `selfcarePriceplanUrl`).
+- Any charge edit sets `chargeCategoryGroup` to `Default` and drops `costCurrencyCode`, even when
+  the edit sends it.
+
+**Two read-back differences are expected:**
+
+- Charges created through this endpoint read back without `chargeCategoryGroup`, even when it was
+  sent; the UI records `Default`. A live plan created in the UI without it also reads back that way,
+  and nothing observed depends on it.
+- The settlement rule array comes back in a different order between reads, like custom-field
+  children. The collateral check compares order-insensitively.
+
+**The UI is no guide here.** OneBill's pricing screen saves over GWT-RPC, not JSON, so the
+capture-the-UI's-payload method that found `fieldsToRemove` gives a field list but no request body.
+The REST shapes above came from the spec plus testing on a disposable product.
 
 ## The link codec
 
