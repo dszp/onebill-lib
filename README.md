@@ -240,6 +240,69 @@ write. Three behaviours here are not caution but necessity, all verified against
 
 `{dryRun: true}` reads and reports what would be written without sending anything.
 
+### Catalogue: products and price plans
+
+To add a model priced like an existing one, clone its plan and change what differs:
+
+```ts
+import { pricePlanFromTemplate } from '@dszp/onebill-lib';
+
+const product = await client.getProduct('EX-PHONES');
+const template = product.pricePlanInfos!.find((p) => p.code === 'EX-X100')!;
+
+const plan = pricePlanFromTemplate(template, {
+  name: 'Example X200 Desk Phone',
+  code: 'EX-X200',
+  availableFrom: '2026-02-01T00:00:00-08:00', // not back-dated; tomorrow is safe
+  description: '<p>Example X200.</p>',
+  amount: 199.99,
+  cost: 120.5,
+  glString: 'Hardware:Example X200 Desk Phone',
+});
+
+const res = await writer.addPricePlan('EX-PHONES', plan);
+res.plan;        // the new plan, read back
+res.collateral;  // existing plans or product fields that moved — expected empty
+```
+
+`addPricePlan` sends **only the product id and the new plan**. The product endpoint merges on PUT, so
+this is the safe shape: the existing plans are never resent. Before sending, it refuses:
+
+- a plan code already on the product;
+- a plan name already on the product, compared with `normalizeName`, because a subscription line
+  identifies its plan only by name;
+- a plan carrying server ids — build plans with `pricePlanFromTemplate`, which removes them.
+
+`createProduct` creates a product with its first plans. It refuses a product code that already
+exists.
+
+Both take `{ dryRun: true }` to check without sending, and `addPricePlan` takes `{ strict: true }` to
+throw when anything besides the new plan changed.
+
+To change an existing plan, name the fields that change:
+
+```ts
+const res = await writer.updatePricePlan('EX-PHONES', 'EX-X100', {
+  amount: 159.99,
+  cost: 125.0,
+  description: '<p>Example X100, revised.</p>',
+});
+res.previous;    // the plan before the edit
+res.plan;        // the plan after, read back
+res.collateral;  // anything else that moved — expected empty
+```
+
+`updatePricePlan` edits `name`, `description`, `availableTo`, and, on a plan with exactly one
+charge, `amount`, `cost`, `glString` and `invoiceDescription`. It sends only ids and the changed
+fields, and the charge is changed in place: it keeps its id and `effectiveFrom`. To stop offering a
+plan without deleting it, set `availableTo`. A new name must not match another plan on the product.
+
+Check one subscription after changing the price of a plan that is in use. Whether an existing
+subscription keeps its old price has not been measured.
+
+The library cannot delete a product or a plan. Deleting a product that subscriptions use is
+untested; do that in OneBill's UI.
+
 ### Links as first-class records
 
 OneBill can hold links in **custom-field groups** — a repeating group per system, with a field for

@@ -7,6 +7,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-05
+
+### Added
+
+- **Catalogue writes on `OneBillWriteClient`.** `addPricePlan(productCode, plan)` adds one price plan
+  to an existing product, sending only the product id and the new plan — the product endpoint merges
+  on PUT, verified live on a disposable product. It refuses a duplicate plan code or plan name and any
+  plan carrying server ids, then reads back and reports `collateral`: existing plans or product fields
+  that moved (expected empty; `strict` throws). `createProduct(product)` creates a product with its
+  first plans and refuses a code that already exists. Both support `dryRun`. New errors:
+  `OneBillCatalogConflictError` (refused before sending) and `OneBillCatalogVerificationError`.
+- **`pricePlanFromTemplate(template, overrides)`** builds a new plan body from a plan read with
+  `getProduct`: it strips the server's ids, links, status and charge timestamp, keeps settings and
+  shared-definition references, and applies name, code, `availableFrom`, description, amount, cost,
+  GL string, invoice description and images. It sends `matchingCurrency: true`, the only value a
+  create accepts. **`findOwnIds(plan)`** lists any ids that would name an existing object.
+- **`updatePricePlan(productCode, planCode, changes)`** edits an existing plan's `name`,
+  `description` or `availableTo`, and on a single-charge plan its `amount`, `cost`, `glString` or
+  invoice description. It sends only ids and the changed fields; verified live, the edit merges and
+  the charge keeps its id and `effectiveFrom`. It refuses a name used by another plan on the product,
+  verifies every requested field on read-back, and reports anything else that moved. The effect of a
+  price edit on existing subscriptions has not been measured.
+- There is no product or plan delete: deleting a product that subscriptions use is untested.
+
 ## [0.6.1] — 2026-09-06
 
 ### Fixed

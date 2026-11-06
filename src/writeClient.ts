@@ -5,10 +5,12 @@ import {
   type LinkMapping,
   type SourcedLink,
 } from './attributes.js';
-import { OneBillHttp, type OneBillHttpConfig } from './http.js';
+import { OneBillApiError, OneBillHttp, type OneBillHttpConfig } from './http.js';
 import { assertPathSegment } from './readClient.js';
 import { canonicalize, formatExternalId, parseExternalId, type Link } from './link.js';
-import type { Rec, Subscriber } from './model.js';
+import type { PricePlanInfo, Product, Rec, Subscriber } from './model.js';
+import { normalizeName } from './names.js';
+import { findOwnIds, type NewPricePlan } from './pricePlan.js';
 
 /**
  * The one write this library performs, and the empirical facts that shape it.
@@ -259,6 +261,186 @@ export interface SetExternalIdOptions {
    * performs anyway, so the check is free. Set this when you genuinely mean to touch one.
    */
   allowNonActive?: boolean;
+}
+
+/** A product body for {@link OneBillWriteClient.createProduct}. */
+export interface NewProduct {
+  code: string;
+  name: string;
+  /** Category code, e.g. `CAT0001` — read one from an existing product's `categoryCode`. */
+  categoryCode: string;
+  /** ISO 8601 with offset. Cannot be back-dated (`10PR1012`); tomorrow is the safe choice. */
+  availableFrom: string;
+  description?: string;
+  pricePlanInfos?: NewPricePlan[];
+  [k: string]: unknown;
+}
+
+/** What {@link OneBillWriteClient.createProduct} did. */
+export interface CreateProductResult {
+  productCode: string;
+  /** Server id of the new product. Empty on a dry run. */
+  id: string;
+  /** The product as read back after the write. Absent on a dry run. */
+  product?: Product;
+  /** The request body that was (or, on a dry run, would have been) sent. */
+  body: NewProduct;
+  dryRun: boolean;
+}
+
+/** What {@link OneBillWriteClient.addPricePlan} did. */
+export interface AddPricePlanResult {
+  productCode: string;
+  planCode: string;
+  /** The new plan as read back after the write. Absent on a dry run. */
+  plan?: PricePlanInfo;
+  /**
+   * Codes of the product's EXISTING plans that differed after the write, plus `product.<key>` for any
+   * product-level field that moved. Expected empty — the endpoint merges (verified live) — so a
+   * non-empty list means its behaviour has shifted. Order-insensitive, like every comparison here.
+   */
+  collateral: string[];
+  /** The request body that was (or would have been) sent: the product id and the new plan only. */
+  body: { id: string; pricePlanInfos: [NewPricePlan] };
+  dryRun: boolean;
+}
+
+/**
+ * The edits {@link OneBillWriteClient.updatePricePlan} can make — each one verified live. Anything
+ * else is deliberately absent: an untested field on this endpoint is an unknown effect on a live price.
+ */
+export interface PricePlanChanges {
+  name?: string;
+  description?: string;
+  /** Last day the plan is offered, ISO 8601 with offset. Retires the plan without deleting it. */
+  availableTo?: string;
+  /** Charge amount. Needs a plan with exactly one charge. */
+  amount?: number;
+  /** Charge cost. Needs a plan with exactly one charge. */
+  cost?: number;
+  /** Charge GL string. Needs a plan with exactly one charge. */
+  glString?: string;
+  /** Invoice line description. Needs a plan with exactly one charge. */
+  invoiceDescription?: string;
+}
+
+/** What {@link OneBillWriteClient.updatePricePlan} did. */
+export interface UpdatePricePlanResult {
+  productCode: string;
+  planCode: string;
+  /** The plan before the write. */
+  previous: PricePlanInfo;
+  /** The plan as read back after the write. Absent on a dry run. */
+  plan?: PricePlanInfo;
+  /**
+   * Everything that moved besides the requested fields: `plan.<key>` / `charge.<key>` on the edited
+   * plan, the codes of OTHER plans that changed, and `product.<key>` for product fields. Expected
+   * empty. The server's own known side effects are not counted — see `updatePricePlan`.
+   */
+  collateral: string[];
+  /** The request body that was (or would have been) sent: ids plus the changed fields only. */
+  body: { id: string; pricePlanInfos: [Rec] };
+  dryRun: boolean;
+}
+
+export interface CatalogWriteOptions {
+  /** Read and check, but send nothing. */
+  dryRun?: boolean;
+  /** Also throw when existing plans or product fields changed. */
+  strict?: boolean;
+}
+
+/** Thrown before anything is sent, when a catalogue write would conflict with what exists. */
+export class OneBillCatalogConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OneBillCatalogConflictError';
+  }
+}
+
+/** Thrown when a catalogue write was accepted but the read-back does not show the expected result. */
+export class OneBillCatalogVerificationError extends Error {
+  constructor(
+    message: string,
+    public readonly result: CreateProductResult | AddPricePlanResult | UpdatePricePlanResult,
+  ) {
+    super(message);
+    this.name = 'OneBillCatalogVerificationError';
+  }
+}
+
+/** OneBill's in-band code for an unknown product code on `GET /products/{code}`. */
+const UNKNOWN_PRODUCT = '10PR1036';
+
+function isUnknownProduct(err: unknown): boolean {
+  if (!(err instanceof OneBillApiError)) return false;
+  const infos = (err.body as Rec | undefined)?.validationResponse?.validationErrorInfo;
+  return Array.isArray(infos) && infos.some((i: Rec) => i?.code === UNKNOWN_PRODUCT);
+}
+
+/** Plan fields the server regenerates when the plan is renamed (the purchase links embed the name). */
+const PLAN_SIDE_EFFECTS = new Set(['url', 'selfcarePriceplanUrl']);
+/**
+ * Charge fields the server rewrites on ANY edit of the charge, measured 2026-11-05: it fills
+ * `chargeCategoryGroup` with `Default` and drops `costCurrencyCode` — even when the edit sends it.
+ */
+const CHARGE_SIDE_EFFECTS = new Set(['chargeCategoryGroup', 'costCurrencyCode']);
+
+const CHARGE_CHANGE_KEYS = ['amount', 'cost', 'glString', 'invoiceDescription'] as const;
+
+/** The plan with the requested changes applied — what a correct write should read back as. */
+function applyChanges(plan: PricePlanInfo, c: PricePlanChanges): Rec {
+  const out = structuredClone(plan) as Rec;
+  if (c.name !== undefined) out.name = c.name;
+  if (c.description !== undefined) out.description = c.description;
+  if (c.availableTo !== undefined) out.availableTo = c.availableTo;
+  const charge = out.pricePlanEventInfos?.[0]?.chargeInfos?.[0] as Rec | undefined;
+  if (charge) {
+    if (c.amount !== undefined) charge.amount = c.amount;
+    if (c.cost !== undefined) charge.cost = c.cost;
+    if (c.glString !== undefined) charge.glString = c.glString;
+    if (c.invoiceDescription !== undefined) {
+      const language = charge.localizedInvoiceDescriptions?.[0]?.language ?? 'US English';
+      charge.localizedInvoiceDescriptions = [{ language, description: c.invoiceDescription }];
+    }
+  }
+  return out;
+}
+
+/** Paths that differ between the expected and actual plan, ignoring the server's known side effects. */
+function planDrift(expected: Rec, actual: Rec, chargeEdited: boolean, renamed: boolean): string[] {
+  const out: string[] = [];
+  for (const key of new Set([...Object.keys(expected), ...Object.keys(actual)])) {
+    if (renamed && PLAN_SIDE_EFFECTS.has(key)) continue;
+    if (key === 'pricePlanEventInfos' && chargeEdited) continue;
+    if (normalize(expected[key]) !== normalize(actual[key])) out.push(`plan.${key}`);
+  }
+  if (!chargeEdited) return out;
+  const [ee, ae] = [expected.pricePlanEventInfos?.[0] ?? {}, actual.pricePlanEventInfos?.[0] ?? {}];
+  for (const key of new Set([...Object.keys(ee), ...Object.keys(ae)])) {
+    if (key === 'chargeInfos') continue;
+    if (normalize(ee[key]) !== normalize(ae[key])) out.push(`event.${key}`);
+  }
+  const [ec, ac] = [ee.chargeInfos?.[0] ?? {}, ae.chargeInfos?.[0] ?? {}];
+  for (const key of new Set([...Object.keys(ec), ...Object.keys(ac)])) {
+    if (CHARGE_SIDE_EFFECTS.has(key)) continue;
+    if (normalize(ec[key]) !== normalize(ac[key])) out.push(`charge.${key}`);
+  }
+  return out;
+}
+
+/** Refuse a plan body naming any existing object, or missing what the server needs to file it. */
+function assertNewPlan(plan: NewPricePlan, where: string): void {
+  if (!plan.code?.trim() || !plan.name?.trim()) {
+    throw new OneBillCatalogConflictError(`${where}: a price plan needs a non-empty code and name.`);
+  }
+  const ids = findOwnIds(plan);
+  if (ids.length > 0) {
+    throw new OneBillCatalogConflictError(
+      `${where}: plan ${plan.code} carries server ids (${ids.join(', ')}). A new plan must not name ` +
+        `existing plans, events, charges or images — build it with pricePlanFromTemplate().`,
+    );
+  }
 }
 
 /**
@@ -580,5 +762,288 @@ export class OneBillWriteClient {
       collateral,
       dryRun: false,
     };
+  }
+
+  #productPath(code: string): string {
+    return `/rest/ProductService/v1/products/${assertPathSegment(code, 'product code')}`;
+  }
+
+  /** A product by code, or `undefined` when OneBill reports the code unknown. */
+  async #tryGetProduct(code: string): Promise<Product | undefined> {
+    try {
+      return await this.#http.request<Product>('GET', this.#productPath(code));
+    } catch (err) {
+      if (isUnknownProduct(err)) return undefined;
+      throw err;
+    }
+  }
+
+  /**
+   * Create a catalogue product, optionally with its first price plans, then read it back.
+   *
+   * Refuses — before sending — a product code that already exists, a plan carrying server ids, and
+   * two plans sharing a code or name. Verified live 2026-11-05 on a disposable product.
+   *
+   * @throws {OneBillCatalogConflictError} before anything is sent.
+   * @throws {OneBillCatalogVerificationError} if a requested plan is missing after the write.
+   * @throws {OneBillApiError} for a server-side rejection, e.g. a back-dated `availableFrom`.
+   */
+  async createProduct(product: NewProduct, opts: CatalogWriteOptions = {}): Promise<CreateProductResult> {
+    const code = product.code?.trim();
+    if (!code || !product.name?.trim() || !product.categoryCode?.trim()) {
+      throw new OneBillCatalogConflictError('createProduct: code, name and categoryCode are required.');
+    }
+    if (product.id !== undefined) {
+      throw new OneBillCatalogConflictError(`createProduct: ${code} carries an id; a new product must not.`);
+    }
+    const plans = product.pricePlanInfos ?? [];
+    const codes = new Set<string>();
+    const names = new Set<string>();
+    for (const p of plans) {
+      assertNewPlan(p, `createProduct ${code}`);
+      if (codes.has(p.code)) throw new OneBillCatalogConflictError(`createProduct ${code}: plan code ${p.code} appears twice.`);
+      const n = normalizeName(p.name);
+      if (names.has(n)) throw new OneBillCatalogConflictError(`createProduct ${code}: plan name ${p.name} appears twice.`);
+      codes.add(p.code);
+      names.add(n);
+    }
+
+    if (await this.#tryGetProduct(code)) {
+      throw new OneBillCatalogConflictError(`createProduct: product ${code} already exists.`);
+    }
+
+    const body: NewProduct = { ...product, code };
+    if (opts.dryRun) return { productCode: code, id: '', body, dryRun: true };
+
+    const created = await this.#http.request<Rec>('POST', '/rest/ProductService/v1/product', { body });
+    const after = await this.#http.request<Product>('GET', this.#productPath(code));
+    const result: CreateProductResult = {
+      productCode: code,
+      id: String(after.id ?? created.id ?? ''),
+      product: after,
+      body,
+      dryRun: false,
+    };
+    const stored = new Set((after.pricePlanInfos ?? []).map((p) => p.code));
+    const missing = plans.filter((p) => !stored.has(p.code)).map((p) => p.code);
+    if (missing.length > 0) {
+      throw new OneBillCatalogVerificationError(
+        `createProduct ${code}: created, but plan(s) missing on read-back: ${missing.join(', ')}`,
+        result,
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Add one price plan to an existing product, then read back and prove nothing else moved.
+   *
+   * The request carries **only the product id and the new plan**. Verified live 2026-11-05 on a
+   * disposable product: `PUT /rest/ProductService/v1/product` MERGES — the existing plan came back
+   * identical, same charge id and `effectiveFrom`, so no charge revision — and product-level fields
+   * survived. That makes the minimal body the safe one, the opposite of a subscriber write: echoing the
+   * existing plans back would resend every field of every live charge, a shape that has not been
+   * tested.
+   *
+   * Refused before sending: a plan code already on the product (what the merge does with one is
+   * untested), a plan NAME already on the product (a subscription line identifies its plan only by
+   * name, so a duplicate makes the catalogue ambiguous), and a plan carrying server ids. Codes on
+   * OTHER products are not checked — that would need a read of every product.
+   *
+   * @throws {OneBillCatalogConflictError} before anything is sent.
+   * @throws {OneBillCatalogVerificationError} if the plan is missing after the write, or with
+   *   `strict` when an existing plan or product field changed.
+   * @throws {OneBillApiError} for an unknown product or a server-side rejection.
+   */
+  async addPricePlan(
+    productCode: string,
+    plan: NewPricePlan,
+    opts: CatalogWriteOptions = {},
+  ): Promise<AddPricePlanResult> {
+    assertNewPlan(plan, `addPricePlan ${productCode}`);
+    const path = this.#productPath(productCode);
+    const before = await this.#http.request<Product>('GET', path);
+    const id = String(before.id ?? '');
+    if (!id) throw new OneBillCatalogConflictError(`addPricePlan: product ${productCode} came back without an id.`);
+
+    const existing = before.pricePlanInfos ?? [];
+    const sameCode = existing.find((p) => p.code === plan.code);
+    if (sameCode) {
+      throw new OneBillCatalogConflictError(`addPricePlan ${productCode}: plan code ${plan.code} already exists.`);
+    }
+    const sameName = existing.find((p) => normalizeName(String(p.name ?? '')) === normalizeName(plan.name));
+    if (sameName) {
+      throw new OneBillCatalogConflictError(
+        `addPricePlan ${productCode}: plan name "${plan.name}" already exists (${String(sameName.code)}).`,
+      );
+    }
+
+    const body: AddPricePlanResult['body'] = { id, pricePlanInfos: [plan] };
+    if (opts.dryRun) {
+      return { productCode, planCode: plan.code, collateral: [], body, dryRun: true };
+    }
+
+    await this.#http.request('PUT', '/rest/ProductService/v1/product', { body });
+    const after = await this.#http.request<Product>('GET', path);
+
+    const collateral: string[] = [];
+    const afterPlans = new Map((after.pricePlanInfos ?? []).map((p) => [p.code, p]));
+    for (const p of existing) {
+      const now = afterPlans.get(p.code);
+      if (!now || normalize(p) !== normalize(now)) collateral.push(String(p.code));
+    }
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      if (key === 'pricePlanInfos' || NOT_SETTABLE.has(key)) continue;
+      if (normalize(before[key]) !== normalize(after[key])) collateral.push(`product.${key}`);
+    }
+    collateral.sort();
+
+    const stored = afterPlans.get(plan.code);
+    const result: AddPricePlanResult = { productCode, planCode: plan.code, plan: stored, collateral, body, dryRun: false };
+    if (!stored) {
+      throw new OneBillCatalogVerificationError(
+        `addPricePlan ${productCode}: accepted, but plan ${plan.code} is missing on read-back.`,
+        result,
+      );
+    }
+    if (opts.strict && collateral.length > 0) {
+      throw new OneBillCatalogVerificationError(
+        `addPricePlan ${productCode}: plan added, but also changed: ${collateral.join(', ')}`,
+        result,
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Edit an existing price plan in place, then read back and prove the edit took and nothing else
+   * moved.
+   *
+   * The request carries only ids and the changed fields — the shape the spec documents. Verified live
+   * 2026-11-05 on a disposable product, for every field in {@link PricePlanChanges}: the edit MERGES
+   * at plan and charge level, the plan, event and charge keep their ids, and the charge's
+   * `effectiveFrom` does not move — the charge is rewritten in place, not versioned. Other plans and
+   * the product were untouched.
+   *
+   * **Unverified: what a price edit does to existing subscriptions.** The test plan had none. Charges
+   * carry `applyForExistingSubscriptions` (false on every plan observed), which suggests existing
+   * subscriptions keep their price, but that has not been measured. Edit the price of a plan that is
+   * in use only once you have checked one subscription afterwards.
+   *
+   * Server side effects that are expected and not reported as collateral: a rename regenerates the
+   * plan's purchase links (`url`, `selfcarePriceplanUrl`); a charge edit fills `chargeCategoryGroup`
+   * and drops `costCurrencyCode` — even when sent, so it is not sent. No effect of the missing cost
+   * currency has been observed.
+   *
+   * Refused before sending: an unknown plan code, an empty change set, a new name already used by
+   * another plan on the product, and a charge change on a plan without exactly one charge.
+   *
+   * @throws {OneBillCatalogConflictError} before anything is sent.
+   * @throws {OneBillCatalogVerificationError} if a requested field did not take, or with `strict`
+   *   when anything else moved.
+   */
+  async updatePricePlan(
+    productCode: string,
+    planCode: string,
+    changes: PricePlanChanges,
+    opts: CatalogWriteOptions = {},
+  ): Promise<UpdatePricePlanResult> {
+    const where = `updatePricePlan ${productCode}/${planCode}`;
+    const requested = Object.entries(changes).filter(([, v]) => v !== undefined);
+    if (requested.length === 0) throw new OneBillCatalogConflictError(`${where}: no changes given.`);
+
+    const path = this.#productPath(productCode);
+    const before = await this.#http.request<Product>('GET', path);
+    const id = String(before.id ?? '');
+    const plans = before.pricePlanInfos ?? [];
+    const previous = plans.find((p) => p.code === planCode);
+    if (!id || !previous?.id) throw new OneBillCatalogConflictError(`${where}: no such plan on the product.`);
+
+    if (changes.name !== undefined) {
+      if (!changes.name.trim()) throw new OneBillCatalogConflictError(`${where}: name cannot be empty.`);
+      const clash = plans.find(
+        (p) => p.code !== planCode && normalizeName(String(p.name ?? '')) === normalizeName(changes.name!),
+      );
+      if (clash) {
+        throw new OneBillCatalogConflictError(`${where}: name "${changes.name}" is already used by ${String(clash.code)}.`);
+      }
+    }
+
+    const planBody: Rec = { id: previous.id };
+    if (changes.name !== undefined) planBody.name = changes.name;
+    if (changes.description !== undefined) planBody.description = changes.description;
+    if (changes.availableTo !== undefined) planBody.availableTo = changes.availableTo;
+
+    const chargeEdited = CHARGE_CHANGE_KEYS.some((k) => changes[k] !== undefined);
+    if (chargeEdited) {
+      const events = (previous.pricePlanEventInfos ?? []) as Rec[];
+      const charges = events.flatMap((e) => (e.chargeInfos ?? []) as Rec[]);
+      if (events.length !== 1 || charges.length !== 1) {
+        throw new OneBillCatalogConflictError(
+          `${where}: charge changes need a plan with exactly one charge; this one has ${charges.length}.`,
+        );
+      }
+      const [event, charge] = [events[0]!, charges[0]!];
+      const chargeBody: Rec = { id: charge.id };
+      if (changes.amount !== undefined) chargeBody.amount = changes.amount;
+      if (changes.cost !== undefined) {
+        chargeBody.cost = changes.cost;
+      }
+      if (changes.glString !== undefined) chargeBody.glString = changes.glString;
+      if (changes.invoiceDescription !== undefined) {
+        const language = charge.localizedInvoiceDescriptions?.[0]?.language ?? 'US English';
+        chargeBody.localizedInvoiceDescriptions = [{ language, description: changes.invoiceDescription }];
+      }
+      planBody.pricePlanEventInfos = [{ id: event.id, chargeInfos: [chargeBody] }];
+    }
+
+    const body: UpdatePricePlanResult['body'] = { id, pricePlanInfos: [planBody] };
+    if (opts.dryRun) {
+      return { productCode, planCode, previous, collateral: [], body, dryRun: true };
+    }
+
+    await this.#http.request('PUT', '/rest/ProductService/v1/product', { body });
+    const after = await this.#http.request<Product>('GET', path);
+    const afterPlans = new Map((after.pricePlanInfos ?? []).map((p) => [p.code, p]));
+    const plan = afterPlans.get(planCode);
+
+    const collateral: string[] = [];
+    for (const p of plans) {
+      if (p.code === planCode) continue;
+      const now = afterPlans.get(p.code);
+      if (!now || normalize(p) !== normalize(now)) collateral.push(String(p.code));
+    }
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      if (key === 'pricePlanInfos' || NOT_SETTABLE.has(key)) continue;
+      if (normalize(before[key]) !== normalize(after[key])) collateral.push(`product.${key}`);
+    }
+
+    const result: UpdatePricePlanResult = { productCode, planCode, previous, plan, collateral, body, dryRun: false };
+    if (!plan) {
+      throw new OneBillCatalogVerificationError(`${where}: plan is missing on read-back.`, result);
+    }
+
+    // Did the requested fields take? Compare the read-back against `previous` with the changes applied;
+    // a requested path that still differs failed, any other differing path is collateral.
+    const expected = applyChanges(previous, changes);
+    const drift = planDrift(expected, plan as Rec, chargeEdited, changes.name !== undefined);
+    const requestedPaths = new Set([
+      ...(['name', 'description', 'availableTo'] as const).filter((k) => changes[k] !== undefined).map((k) => `plan.${k}`),
+      ...(changes.amount !== undefined ? ['charge.amount'] : []),
+      ...(changes.cost !== undefined ? ['charge.cost'] : []),
+      ...(changes.glString !== undefined ? ['charge.glString'] : []),
+      ...(changes.invoiceDescription !== undefined ? ['charge.localizedInvoiceDescriptions'] : []),
+    ]);
+    const failed = drift.filter((d) => requestedPaths.has(d));
+    collateral.push(...drift.filter((d) => !requestedPaths.has(d)));
+    collateral.sort();
+
+    if (failed.length > 0) {
+      throw new OneBillCatalogVerificationError(`${where}: accepted, but did not take: ${failed.join(', ')}`, result);
+    }
+    if (opts.strict && collateral.length > 0) {
+      throw new OneBillCatalogVerificationError(`${where}: edited, but also changed: ${collateral.join(', ')}`, result);
+    }
+    return result;
   }
 }
